@@ -117,15 +117,16 @@ export class QueueDurableObject extends DurableObject<Env> {
   private async loadConfig(eventId: string): Promise<EventConfig | null> {
     if (this.config?.eventId === eventId) return this.config;
 
-    const raw = await this.env.CONFIG_KV.get(`${EVENT_CONFIG_PREFIX}${eventId}`);
-    if (!raw) return null;
-
     try {
+      const raw = await this.env.CONFIG_KV.get(`${EVENT_CONFIG_PREFIX}${eventId}`);
+      if (!raw) return null;
+
       this.config = JSON.parse(raw) as EventConfig;
       return this.config;
-    } catch {
-      console.error(`[QueueDO] Failed to parse config for event ${eventId}`);
-      return null;
+    } catch (e) {
+      console.error(`[QueueDO] Failed to load config for event ${eventId}:`, e);
+      // Rethrow so callers can distinguish KV errors from missing config
+      throw e;
     }
   }
 
@@ -148,10 +149,17 @@ export class QueueDurableObject extends DurableObject<Env> {
 
     // Persist the event ID from the query string so the DO knows which event it serves.
     // This is set by the queue-page handler when forwarding requests to the DO.
+    // Always reload config (not just when this.config is null) because in-memory
+    // state is lost when the DO wakes from hibernation.
     const eventIdParam = url.searchParams.get("event");
-    if (eventIdParam && !this.config) {
+    if (eventIdParam) {
       await this.setEventId(eventIdParam);
-      await this.loadConfig(eventIdParam);
+      try {
+        this.config = null; // Force reload from KV
+        await this.loadConfig(eventIdParam);
+      } catch {
+        // KV error during fetch — config will be retried in handleJoin/alarm
+      }
     }
 
     // WebSocket upgrade
@@ -246,8 +254,25 @@ export class QueueDurableObject extends DurableObject<Env> {
       return;
     }
 
-    const config = await this.loadConfig(eventId);
-    if (!config || !config.enabled) {
+    let config: EventConfig | null;
+    try {
+      config = await this.loadConfig(eventId);
+    } catch {
+      // KV transient error — tell client to retry rather than showing a hard error
+      this.sendToSocket(ws, {
+        type: "error",
+        code: "TEMPORARY_ERROR",
+        message: "Temporary error loading event configuration. Please refresh the page.",
+      });
+      return;
+    }
+
+    if (!config) {
+      this.sendToSocket(ws, { type: "error", code: "EVENT_NOT_FOUND", message: "Event configuration not found" });
+      return;
+    }
+
+    if (!config.enabled) {
       this.sendToSocket(ws, { type: "error", code: "EVENT_INACTIVE", message: "Event is not active" });
       return;
     }
@@ -358,8 +383,30 @@ export class QueueDurableObject extends DurableObject<Env> {
     const eventId = this.getEventId();
     if (!eventId) return;
 
-    const config = await this.loadConfig(eventId);
-    if (!config || !config.enabled) return;
+    // Always reschedule if there are visitors waiting, even if config
+    // temporarily fails to load (KV eventual consistency / transient errors).
+    // This prevents visitors from being permanently stuck in the queue.
+    const activeCount = this.getActiveVisitorCount();
+    const shouldReschedule = activeCount > 0;
+
+    let config: EventConfig | null;
+    try {
+      config = await this.loadConfig(eventId);
+    } catch {
+      // KV transient error — reschedule to retry later
+      console.error(`[QueueDO] Alarm: failed to load config for ${eventId}, will retry`);
+      if (shouldReschedule) {
+        await this.ensureAlarmScheduled();
+      }
+      return;
+    }
+
+    if (!config || !config.enabled) {
+      if (shouldReschedule) {
+        await this.ensureAlarmScheduled();
+      }
+      return;
+    }
 
     // Clean up disconnected visitors past grace period
     this.cleanupDisconnected();
@@ -398,8 +445,7 @@ export class QueueDurableObject extends DurableObject<Env> {
     this.broadcastPositionUpdates();
 
     // Reschedule if there are still visitors waiting
-    const remaining = this.getActiveVisitorCount();
-    if (remaining > 0) {
+    if (shouldReschedule) {
       await this.ensureAlarmScheduled();
     }
   }

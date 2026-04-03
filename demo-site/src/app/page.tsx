@@ -1,17 +1,19 @@
 import Link from "next/link";
 import { getFeaturedEvents, EVENTS, CATEGORIES } from "@/lib/events";
 import { EventCard } from "@/components/event-card";
+import { fetchQueueStatusMap, isQueueEnabled } from "@/lib/queue-status";
 
-export default function HomePage() {
+export default async function HomePage() {
   const featured = getFeaturedEvents();
   const upcoming = EVENTS.filter((e) => !e.soldOut).slice(0, 4);
+  const queueStatusMap = await fetchQueueStatusMap();
 
   return (
     <>
       {/* ── Hero ── */}
       <section className="relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-purple-900/40 via-bg to-pink-900/20 animate-gradient" />
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_40%,rgba(168,85,247,0.15),transparent_50%)]" />
+        <div className="absolute inset-0 bg-gradient-to-br from-red-900/40 via-bg to-orange-900/20 animate-gradient" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_40%,rgba(208,65,37,0.15),transparent_50%)]" />
 
         <div className="relative mx-auto max-w-7xl px-4 pb-20 pt-24 sm:px-6 sm:pb-28 sm:pt-32 lg:px-8">
           <div className="max-w-3xl">
@@ -20,7 +22,7 @@ export default function HomePage() {
             </p>
             <h1 className="mt-4 text-4xl font-extrabold tracking-tight sm:text-6xl lg:text-7xl">
               Feel the{" "}
-              <span className="gradient-text bg-gradient-to-r from-purple-400 via-pink-400 to-orange-400">
+              <span className="gradient-text bg-gradient-to-r from-red-400 via-orange-400 to-amber-400">
                 music
               </span>
               , live.
@@ -82,7 +84,7 @@ export default function HomePage() {
 
         <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {featured.map((event) => (
-            <EventCard key={event.slug} event={event} />
+            <EventCard key={event.slug} event={event} queueEnabled={isQueueEnabled(queueStatusMap, event.slug)} />
           ))}
         </div>
       </section>
@@ -134,7 +136,7 @@ export default function HomePage() {
 
         <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {upcoming.map((event) => (
-            <EventCard key={event.slug} event={event} />
+            <EventCard key={event.slug} event={event} queueEnabled={isQueueEnabled(queueStatusMap, event.slug)} />
           ))}
         </div>
       </section>

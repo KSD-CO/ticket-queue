@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getEventBySlug, EVENTS, formatDate, formatPrice } from "@/lib/events";
+import { fetchQueueStatusMap, isQueueEnabled } from "@/lib/queue-status";
 import { TicketSelector } from "@/components/ticket-selector";
 
 interface EventDetailPageProps {
@@ -29,6 +30,9 @@ export default async function EventDetailPage({ params }: EventDetailPageProps) 
     notFound();
   }
 
+  const queueStatusMap = await fetchQueueStatusMap();
+  const queueEnabled = isQueueEnabled(queueStatusMap, event.slug);
+
   const lowestAvailable = event.ticketTiers
     .filter((t) => t.available > 0)
     .sort((a, b) => a.price - b.price)[0];
@@ -48,7 +52,7 @@ export default async function EventDetailPage({ params }: EventDetailPageProps) 
             <span className="rounded-full bg-white/10 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm">
               {event.category.replace("-", " ")}
             </span>
-            {event.queueEnabled && (
+            {queueEnabled && (
               <span className="rounded-full bg-accent/80 px-3 py-1 text-xs font-medium text-white backdrop-blur-sm">
                 Virtual Queue
               </span>
@@ -112,7 +116,7 @@ export default async function EventDetailPage({ params }: EventDetailPageProps) 
             </section>
 
             {/* Queue info banner */}
-            {event.queueEnabled && !event.soldOut && (
+            {queueEnabled && !event.soldOut && (
               <section className="rounded-xl border border-accent/20 bg-accent/5 p-5">
                 <h3 className="font-semibold text-accent">Virtual Queue Active</h3>
                 <p className="mt-1 text-sm text-text-secondary">
@@ -130,7 +134,7 @@ export default async function EventDetailPage({ params }: EventDetailPageProps) 
               <TicketSelector
                 tiers={event.ticketTiers}
                 eventSlug={event.slug}
-                queueEnabled={event.queueEnabled}
+                queueEnabled={queueEnabled}
                 soldOut={event.soldOut}
               />
 

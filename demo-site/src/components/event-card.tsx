@@ -1,7 +1,13 @@
 import Link from "next/link";
 import { type MusicEvent, formatPrice, formatDate } from "@/lib/events";
 
-export function EventCard({ event }: { event: MusicEvent }) {
+interface EventCardProps {
+  event: MusicEvent;
+  /** Queue enabled status from backend config. Defaults to false. */
+  queueEnabled?: boolean;
+}
+
+export function EventCard({ event, queueEnabled = false }: EventCardProps) {
   const lowestPrice = event.ticketTiers
     .filter((t) => t.available > 0)
     .sort((a, b) => a.price - b.price)[0];
@@ -35,7 +41,7 @@ export function EventCard({ event }: { event: MusicEvent }) {
           )}
 
           {/* Queue badge */}
-          {event.queueEnabled && !event.soldOut && (
+          {queueEnabled && !event.soldOut && (
             <span className="absolute right-3 top-3 rounded-full bg-accent/90 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
               Queue Active
             </span>

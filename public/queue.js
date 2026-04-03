@@ -141,6 +141,13 @@
   }
 
   function handleError(msg) {
+    if (msg.code === "TEMPORARY_ERROR") {
+      // Transient error (e.g., KV unavailable after hibernation wake) — auto-retry
+      setStatus("Retrying...", "reconnecting");
+      cleanup();
+      setTimeout(connect, 3000);
+      return;
+    }
     setStatus(msg.message || "An error occurred", "error");
   }
 

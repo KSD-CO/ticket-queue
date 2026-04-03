@@ -25,6 +25,7 @@ import {
   deleteEvent,
   updateRate,
   getStats,
+  getPublicQueueStatus,
 } from "./handlers.js";
 
 interface AdminEnv {
@@ -57,6 +58,10 @@ app.onError((err, c) => {
 // ── Health check (no auth) ──
 
 app.get("/health", (c) => c.json({ status: "ok", worker: "queue-admin" }));
+
+// ── Public endpoints (no auth) ──
+
+app.get("/api/public/queue-status", getPublicQueueStatus);
 
 // ── All API routes require auth ──
 

@@ -35,8 +35,6 @@ export interface MusicEvent {
   emoji: string;                   // visual stand-in for artwork
   featured: boolean;
   soldOut: boolean;
-  /** Queue system enabled for this event's checkout */
-  queueEnabled: boolean;
 }
 
 export const EVENTS: MusicEvent[] = [
@@ -94,7 +92,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "🎆",
     featured: true,
     soldOut: false,
-    queueEnabled: true,
   },
   {
     slug: "acoustic-garden",
@@ -138,7 +135,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "🌿",
     featured: false,
     soldOut: false,
-    queueEnabled: false,
   },
   {
     slug: "bassline-warehouse",
@@ -182,7 +178,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "🔊",
     featured: true,
     soldOut: false,
-    queueEnabled: true,
   },
   {
     slug: "jazz-on-the-rooftop",
@@ -225,7 +220,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "🎷",
     featured: false,
     soldOut: false,
-    queueEnabled: false,
   },
   {
     slug: "saigon-symphony-night",
@@ -278,7 +272,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "🎻",
     featured: true,
     soldOut: false,
-    queueEnabled: true,
   },
   {
     slug: "sunrise-beach-party",
@@ -323,7 +316,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "🏖️",
     featured: false,
     soldOut: false,
-    queueEnabled: true,
   },
   {
     slug: "retro-vinyl-night",
@@ -357,7 +349,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "💿",
     featured: false,
     soldOut: true,
-    queueEnabled: false,
   },
   {
     slug: "k-wave-live-2026",
@@ -410,7 +401,6 @@ export const EVENTS: MusicEvent[] = [
     emoji: "💜",
     featured: true,
     soldOut: false,
-    queueEnabled: true,
   },
 ];
 

@@ -66,7 +66,14 @@ export function QueueOverlay({ eventId, queueUrl, returnUrl, onRelease }: QueueO
             setState({ status: "queue_full", currentSize: msg.currentSize, maxSize: msg.maxSize });
             break;
           case "error":
-            setState({ status: "error", message: msg.message });
+            if (msg.code === "TEMPORARY_ERROR") {
+              // Transient error — auto-retry
+              setState({ status: "connecting" });
+              ws.close();
+              setTimeout(connect, 3000);
+            } else {
+              setState({ status: "error", message: msg.message });
+            }
             break;
         }
       } catch { /* ignore parse errors */ }
@@ -131,7 +138,7 @@ export function QueueOverlay({ eventId, queueUrl, returnUrl, onRelease }: QueueO
               {/* Progress bar */}
               <div className="mt-4 h-1 w-full overflow-hidden rounded-full bg-bg-elevated">
                 <div
-                  className="h-full rounded-full bg-gradient-to-r from-accent to-pink-500 transition-all duration-700"
+                  className="h-full rounded-full bg-gradient-to-r from-accent to-orange-500 transition-all duration-700"
                   style={{ width: `${progressPct}%` }}
                 />
               </div>

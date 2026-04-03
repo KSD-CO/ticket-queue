@@ -1,5 +1,6 @@
 import { EVENTS, CATEGORIES, type MusicEvent } from "@/lib/events";
 import { EventCard } from "@/components/event-card";
+import { fetchQueueStatusMap, isQueueEnabled } from "@/lib/queue-status";
 import Link from "next/link";
 
 interface EventsPageProps {
@@ -10,6 +11,8 @@ export default async function EventsPage({ searchParams }: EventsPageProps) {
   const params = await searchParams;
   const category = params.category as MusicEvent["category"] | undefined;
   const query = params.q?.toLowerCase();
+
+  const queueStatusMap = await fetchQueueStatusMap();
 
   let events = EVENTS;
   if (category) {
@@ -70,7 +73,7 @@ export default async function EventsPage({ searchParams }: EventsPageProps) {
       {events.length > 0 ? (
         <div className="mt-8 grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {events.map((event) => (
-            <EventCard key={event.slug} event={event} />
+            <EventCard key={event.slug} event={event} queueEnabled={isQueueEnabled(queueStatusMap, event.slug)} />
           ))}
         </div>
       ) : (

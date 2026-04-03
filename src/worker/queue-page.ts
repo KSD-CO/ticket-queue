@@ -228,8 +228,15 @@ function getInlineQueuePage(eventId: string, returnUrl: string): string {
             break;
 
           case "error":
-            document.getElementById("status").textContent = msg.message;
-            document.getElementById("status").classList.add("error");
+            if (msg.code === "TEMPORARY_ERROR") {
+              // Transient error — auto-retry after a short delay
+              document.getElementById("status").textContent = "Reconnecting...";
+              if (ws) { try { ws.close(); } catch(e) {} }
+              setTimeout(connect, 3000);
+            } else {
+              document.getElementById("status").textContent = msg.message;
+              document.getElementById("status").classList.add("error");
+            }
             break;
 
           case "pong":

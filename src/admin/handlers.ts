@@ -189,6 +189,26 @@ export async function updateRate(c: AdminContext): Promise<Response> {
   return c.json({ eventId, releaseRate });
 }
 
+/** GET /api/public/queue-status — public endpoint, returns {eventId, enabled} for all events */
+export async function getPublicQueueStatus(c: AdminContext): Promise<Response> {
+  const list = await c.env.CONFIG_KV.list({ prefix: EVENT_CONFIG_PREFIX });
+  const statuses: { eventId: string; enabled: boolean }[] = [];
+
+  for (const key of list.keys) {
+    const raw = await c.env.CONFIG_KV.get(key.name);
+    if (raw) {
+      try {
+        const config = JSON.parse(raw) as EventConfig;
+        statuses.push({ eventId: config.eventId, enabled: config.enabled });
+      } catch {
+        // Skip malformed entries
+      }
+    }
+  }
+
+  return c.json({ statuses });
+}
+
 /** GET /api/events/:id/stats — get queue stats from DO */
 export async function getStats(c: AdminContext): Promise<Response> {
   const eventId = c.req.param("id")!;

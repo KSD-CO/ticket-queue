@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getEventBySlug, formatPrice, type MusicEvent, type TicketTier } from "@/lib/events";
+import { fetchQueueEnabledForEvent } from "@/lib/queue-status";
 import { QueueOverlay } from "@/components/queue-overlay";
 
 function CheckoutContent() {
@@ -13,6 +14,7 @@ function CheckoutContent() {
   const [orderItems, setOrderItems] = useState<{ tier: TicketTier; qty: number }[]>([]);
   const [showQueue, setShowQueue] = useState(false);
   const [hasToken, setHasToken] = useState(false);
+  const [queueEnabled, setQueueEnabled] = useState(false);
   const [paymentSubmitted, setPaymentSubmitted] = useState(false);
 
   useEffect(() => {
@@ -36,10 +38,15 @@ function CheckoutContent() {
     const tokenCookie = cookies.find((c) => c.trim().startsWith("__queue_token="));
     if (tokenCookie) {
       setHasToken(true);
-    } else if (found.queueEnabled) {
-      // Need to go through queue
-      setShowQueue(true);
     }
+
+    // Check queue status from backend config
+    fetchQueueEnabledForEvent(found.slug).then((enabled) => {
+      setQueueEnabled(enabled);
+      if (enabled && !tokenCookie) {
+        setShowQueue(true);
+      }
+    });
   }, [eventSlug, searchParams]);
 
   if (!eventSlug || !event) {
@@ -134,7 +141,7 @@ function CheckoutContent() {
 
       <div className="mx-auto max-w-4xl px-4 py-10 sm:px-6">
         {/* Queue status banner */}
-        {event.queueEnabled && hasToken && (
+        {queueEnabled && hasToken && (
           <div className="mb-6 rounded-xl border border-success/20 bg-success/5 p-4 text-center">
             <p className="text-sm font-medium text-success">
               &#10003; You have queue access. Complete your purchase before the token expires.
