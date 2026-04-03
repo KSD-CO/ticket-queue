@@ -24,6 +24,11 @@ main = "src/worker/index.ts"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+# ── Route: intercept all traffic on ticket.ironcode.cloud ──
+routes = [
+  { pattern = "ticket.ironcode.cloud/*", zone_name = "ironcode.cloud" }
+]
+
 [observability]
 enabled = true
 

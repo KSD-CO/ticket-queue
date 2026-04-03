@@ -146,6 +146,14 @@ export class QueueDurableObject extends DurableObject<Env> {
 
     const url = new URL(request.url);
 
+    // Persist the event ID from the query string so the DO knows which event it serves.
+    // This is set by the queue-page handler when forwarding requests to the DO.
+    const eventIdParam = url.searchParams.get("event");
+    if (eventIdParam && !this.config) {
+      await this.setEventId(eventIdParam);
+      await this.loadConfig(eventIdParam);
+    }
+
     // WebSocket upgrade
     if (request.headers.get("Upgrade") === "websocket") {
       return this.handleWebSocketUpgrade(request);
