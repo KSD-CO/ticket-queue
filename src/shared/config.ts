@@ -137,10 +137,7 @@ export function validateCreateEvent(input: unknown): { valid: true; data: Create
     errors.originUrl = "originUrl is required and must be a non-empty string";
   } else {
     try {
-      const url = new URL(data.originUrl);
-      if (url.protocol !== "https:") {
-        errors.originUrl = "originUrl must use HTTPS";
-      }
+      new URL(data.originUrl);
     } catch {
       errors.originUrl = "originUrl must be a valid URL";
     }

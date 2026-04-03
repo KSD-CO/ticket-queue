@@ -178,7 +178,7 @@ describe("Admin API Integration", () => {
       expect(res.status).toBe(400);
     });
 
-    test("rejects non-HTTPS origin URL", async () => {
+    test("accepts HTTP origin URL", async () => {
       const res = await adminFetch("/api/events", {
         method: "POST",
         headers: authHeaders(),
@@ -186,7 +186,7 @@ describe("Admin API Integration", () => {
           makeEventInput({ originUrl: "http://insecure.example.com" }),
         ),
       });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(201);
     });
 
     test("rejects invalid JSON body", async () => {

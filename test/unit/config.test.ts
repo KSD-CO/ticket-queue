@@ -66,10 +66,9 @@ describe("EventConfig", () => {
       expect(result.valid).toBe(false);
     });
 
-    test("rejects non-HTTPS originUrl", () => {
+    test("accepts HTTP originUrl", () => {
       const result = validateCreateEvent({ ...validInput, originUrl: "http://insecure.com" });
-      expect(result.valid).toBe(false);
-      if (!result.valid) expect(result.errors.originUrl).toContain("HTTPS");
+      expect(result.valid).toBe(true);
     });
 
     test("rejects invalid originUrl", () => {
