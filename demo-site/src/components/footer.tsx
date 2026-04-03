@@ -6,7 +6,7 @@ export function Footer() {
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
         <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
           <div>
-            <span className="text-xl font-bold gradient-text bg-gradient-to-r from-purple-400 to-pink-500">
+            <span className="text-xl font-bold gradient-text bg-gradient-to-r from-red-400 to-orange-500">
               VIBE
             </span>
             <p className="mt-3 text-sm text-text-muted">

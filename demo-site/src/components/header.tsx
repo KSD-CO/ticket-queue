@@ -6,7 +6,7 @@ export function Header() {
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <Link href="/" className="flex items-center gap-2">
           <span className="text-2xl font-bold tracking-tight">
-            <span className="gradient-text bg-gradient-to-r from-purple-400 to-pink-500">
+            <span className="gradient-text bg-gradient-to-r from-red-400 to-orange-500">
               VIBE
             </span>
           </span>
