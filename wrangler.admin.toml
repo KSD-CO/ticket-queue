@@ -22,7 +22,7 @@ enabled = true
 # ── KV namespace (shared with queue-worker) ──
 [[kv_namespaces]]
 binding = "CONFIG_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "3a3c14034375429e991deee9ef81940b"
 
 # ── Durable Object binding (for stats) ──
 [durable_objects]

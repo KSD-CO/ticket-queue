@@ -50,7 +50,7 @@ new_sqlite_classes = ["QueueDurableObject"]
 # ── KV namespace (event config + signing keys) ──
 [[kv_namespaces]]
 binding = "CONFIG_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "3a3c14034375429e991deee9ef81940b"
 
 # ── Environment variables ──
 [vars]
