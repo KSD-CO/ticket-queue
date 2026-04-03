@@ -24,10 +24,10 @@ enabled = true
 binding = "CONFIG_KV"
 id = "3a3c14034375429e991deee9ef81940b"
 
-# ── Durable Object binding (for stats) ──
+# ── Durable Object binding (external — owned by ticket-queue-worker) ──
 [durable_objects]
 bindings = [
-  { name = "QUEUE_DO", class_name = "QueueDurableObject" }
+  { name = "QUEUE_DO", class_name = "QueueDurableObject", script_name = "ticket-queue-worker" }
 ]
 
 # ── Environment variables ──
