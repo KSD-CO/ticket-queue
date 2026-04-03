@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Waiting Room</title>
+  <link rel="stylesheet" href="/queue.css">
+</head>
+<body>
+  <div class="queue-container">
+    <h1>You're in the queue</h1>
+    <p class="subtitle">Please keep this page open. You'll be redirected automatically.</p>
+
+    <div class="position-card">
+      <p class="position-label">Your position</p>
+      <div class="position-number" id="position">--</div>
+      <p class="ahead-count" id="ahead-label">Waiting to connect...</p>
+    </div>
+
+    <p class="eta" id="eta">Calculating wait time...</p>
+
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress"></div>
+    </div>
+
+    <p class="status">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status">Connecting...</span>
+    </p>
+  </div>
+
+  <!--
+    Server-side template variables injected by queue-page.ts:
+      {{EVENT_ID}}   — the event this queue belongs to
+      {{RETURN_URL}}  — URL-encoded original destination
+  -->
+  <script>
+    window.__QUEUE_CONFIG = {
+      eventId: "{{EVENT_ID}}",
+      returnUrl: decodeURIComponent("{{RETURN_URL}}")
+    };
+  </script>
+  <script src="/queue.js"></script>
+</body>
+</html>

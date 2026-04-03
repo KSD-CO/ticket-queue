@@ -1,0 +1,35 @@
+#:schema node_modules/wrangler/config-schema.json
+
+# ============================================================
+# Worker 2: queue-admin (admin API)
+#
+# Handles:
+#   - CRUD event configuration
+#   - Release rate adjustment
+#   - Queue stats retrieval
+#
+# Auth: API key via Bearer token in Authorization header
+# ============================================================
+
+name = "ticket-queue-admin"
+main = "src/admin/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# ── KV namespace (shared with queue-worker) ──
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# ── Durable Object binding (for stats) ──
+[durable_objects]
+bindings = [
+  { name = "QUEUE_DO", class_name = "QueueDurableObject" }
+]
+
+# ── Environment variables ──
+[vars]
+ENVIRONMENT = "production"

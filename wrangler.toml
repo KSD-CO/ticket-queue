@@ -1,0 +1,57 @@
+#:schema node_modules/wrangler/config-schema.json
+
+# ============================================================
+# Worker 1: queue-worker (visitor-facing)
+#
+# Handles:
+#   - Gateway: token check → proxy to origin or redirect to queue
+#   - Queue page: serve waiting room HTML + static assets
+#   - WebSocket: real-time position updates via Durable Object
+#
+# Architecture:
+#   Visitor ──▶ Gateway ──▶ token valid? ──▶ proxy to origin
+#                              │ no
+#                              ▼
+#                         Queue Page ──WS──▶ Durable Object
+#                              │                    │
+#                              ◄── position updates ─┘
+#                              │
+#                         token issued ──▶ redirect to origin
+# ============================================================
+
+name = "ticket-queue-worker"
+main = "src/worker/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[observability]
+enabled = true
+
+# ── Static assets (queue page HTML/JS/CSS) ──
+# serve_directly = false ensures the worker always runs first,
+# so our Hono routes can inject event config into the HTML.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+html_handling = "none"
+not_found_handling = "none"
+
+# ── Durable Object binding ──
+[durable_objects]
+bindings = [
+  { name = "QUEUE_DO", class_name = "QueueDurableObject" }
+]
+
+# ── DO migration (SQLite-backed) ──
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["QueueDurableObject"]
+
+# ── KV namespace (event config + signing keys) ──
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# ── Environment variables ──
+[vars]
+ENVIRONMENT = "production"

@@ -1,0 +1,26 @@
+{
+  "name": "ticket-queue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:admin": "wrangler dev --config wrangler.admin.toml",
+    "deploy": "wrangler deploy && wrangler deploy --config wrangler.admin.toml",
+    "deploy:worker": "wrangler deploy",
+    "deploy:admin": "wrangler deploy --config wrangler.admin.toml",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20250327.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0",
+    "wrangler": "^4.6.0"
+  }
+}
