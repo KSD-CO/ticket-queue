@@ -21,14 +21,12 @@ RUN npm run build
 
 # ── Stage 3: Production image ──
 #
-# Next.js standalone in a monorepo outputs:
+# Next.js standalone output (non-monorepo build):
 #   .next/standalone/
-#     node_modules/          (shared: sharp, etc.)
-#     demo-site/
-#       server.js
-#       node_modules/        (next, react, etc.)
+#     server.js
+#     node_modules/
 #
-# We replicate this layout so require() paths resolve correctly.
+# Static assets must be copied separately into .next/static.
 # ============================================================
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -41,15 +39,10 @@ ENV PORT=3000
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Replicate the standalone directory structure
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-
-# Copy static assets into the app subfolder
-# Only copy public/ if it exists in the build — currently demo-site has no public/ dir
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./demo-site/.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 EXPOSE 3000
 
-WORKDIR /app/demo-site
 CMD ["node", "server.js"]
