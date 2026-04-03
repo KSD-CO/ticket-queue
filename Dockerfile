@@ -45,7 +45,7 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 
 # Copy static assets into the app subfolder
-COPY --from=builder /app/public ./demo-site/public
+# Only copy public/ if it exists in the build — currently demo-site has no public/ dir
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./demo-site/.next/static
 
 USER nextjs

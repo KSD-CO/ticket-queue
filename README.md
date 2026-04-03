@@ -216,16 +216,20 @@ docker run -p 3000:3000 ticket-queue
 
 ### CI/CD
 
-The `.github/workflows/deploy.yml` workflow:
+The `.github/workflows/deploy.yml` workflow runs on every push to `main`:
 
-1. Builds the Docker image on push to `main`
-2. Pushes to Docker Hub as `jamesvu/lunev3:ticket-queue`
-3. SSHs into the deploy server and runs `deploy.sh`
+1. **Test** — typecheck + run all 93 tests in the Workers runtime
+2. **Deploy Workers** — deploy both Cloudflare Workers (`queue-worker` + `queue-admin`)
+3. **Deploy Demo Site** — build & push Docker image, then SSH deploy to server
+
+On pull requests, only the test job runs.
 
 **Required GitHub secrets:**
 
 | Secret | Description |
 |---|---|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers permissions |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `DOCKER_USERNAME` | Docker Hub username |
 | `DOCKER_PASSWORD` | Docker Hub password or access token |
 | `SSH_HOST` | Deploy server hostname/IP |
