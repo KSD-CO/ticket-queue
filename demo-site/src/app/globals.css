@@ -67,3 +67,32 @@ html {
 /* ── Hide scrollbar utility ── */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ── Form input ── */
+.input {
+  width: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  color: var(--color-text);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(168, 85, 247, 0.25);
+}
+.input::placeholder {
+  color: var(--color-text-muted);
+}
+/* Style select arrows for dark mode */
+select.input {
+  appearance: auto;
+  cursor: pointer;
+}
+/* Style datetime-local for dark mode */
+.input::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}

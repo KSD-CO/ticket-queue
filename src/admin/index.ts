@@ -14,6 +14,7 @@
 // ============================================================
 
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { adminAuth } from "./auth.js";
 import { QueueError } from "../shared/errors.js";
 import {
@@ -33,6 +34,15 @@ interface AdminEnv {
 }
 
 const app = new Hono<{ Bindings: AdminEnv }>();
+
+// ── CORS (allow admin dashboard from any origin) ──
+
+app.use("/*", cors({
+  origin: "*",
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "Authorization"],
+  maxAge: 86400,
+}));
 
 // ── Global error handler ──
 

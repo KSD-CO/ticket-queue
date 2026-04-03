@@ -35,6 +35,12 @@ export function Header() {
 
         <div className="flex items-center gap-3">
           <Link
+            href="/admin"
+            className="text-sm font-medium text-text-muted transition-colors hover:text-text"
+          >
+            Admin
+          </Link>
+          <Link
             href="/events"
             className="rounded-full bg-accent px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-accent-hover"
           >
