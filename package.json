@@ -11,6 +11,8 @@
     "deploy:admin": "wrangler deploy --config wrangler.admin.toml",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:load": "k6 run load-test/queue-flow.js",
+    "test:load:gateway": "k6 run load-test/gateway-throughput.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -33,8 +33,10 @@ routes = [
 enabled = true
 
 # ── Static assets (queue page HTML/JS/CSS) ──
-# serve_directly = false ensures the worker always runs first,
-# so our Hono routes can inject event config into the HTML.
+# With binding = "ASSETS", the Worker can fetch assets via the ASSETS binding.
+# Static files (.js, .css) are served by the Cloudflare asset platform and
+# automatically cached at the edge based on file extension (default CDN rules).
+# The Worker code only injects event data into queue.html via the binding.
 [assets]
 directory = "./public"
 binding = "ASSETS"
