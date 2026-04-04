@@ -2,13 +2,14 @@
 // Worker 2 entry point: Admin API
 //
 // Route map:
-//   POST   /api/events          → create event
-//   GET    /api/events          → list events
-//   GET    /api/events/:id      → get event
-//   PUT    /api/events/:id      → update event
-//   DELETE /api/events/:id      → delete event
-//   PUT    /api/events/:id/rate → adjust release rate
-//   GET    /api/events/:id/stats → queue stats
+//   POST   /api/events               → create event
+//   GET    /api/events               → list events
+//   GET    /api/events/:id           → get event
+//   PUT    /api/events/:id           → update event
+//   DELETE /api/events/:id           → delete event
+//   PUT    /api/events/:id/rate      → adjust release rate
+//   POST   /api/events/:id/rotate-key → rotate signing key
+//   GET    /api/events/:id/stats     → queue stats
 //
 // All routes require Bearer token authentication.
 // ============================================================
@@ -24,6 +25,7 @@ import {
   updateEvent,
   deleteEvent,
   updateRate,
+  rotateKey,
   getStats,
   getPublicQueueStatus,
 } from "./handlers.js";
@@ -75,9 +77,10 @@ app.get("/api/events/:id", getEvent);
 app.put("/api/events/:id", updateEvent);
 app.delete("/api/events/:id", deleteEvent);
 
-// ── Rate adjustment ──
+// ── Rate adjustment + key rotation ──
 
 app.put("/api/events/:id/rate", updateRate);
+app.post("/api/events/:id/rotate-key", rotateKey);
 
 // ── Stats ──
 

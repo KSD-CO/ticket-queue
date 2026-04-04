@@ -46,3 +46,20 @@ export const MAX_VISITORS_PER_DO = 50_000;
 
 /** Visitor position grace period after disconnect (seconds) */
 export const DISCONNECT_GRACE_SECONDS = 120;
+
+// ── Edge caching defaults ──
+
+/** Default edge cache TTL for proxied origin responses (seconds) */
+export const DEFAULT_EDGE_CACHE_TTL = 60;
+
+/** Default browser cache TTL for proxied origin responses (seconds) */
+export const DEFAULT_BROWSER_CACHE_TTL = 0;
+
+/** Cache TTL for static queue assets — CSS, JS (seconds). Long-lived because content-hashed. */
+export const STATIC_ASSET_CACHE_TTL = 86_400; // 24 hours
+
+/** Cache TTL for the queue page HTML (seconds). Short because it contains injected event data. */
+export const QUEUE_PAGE_CACHE_TTL = 0; // no browser cache — HTML is dynamic per event
+
+/** Maximum concurrent releases per alarm tick (origin stampede protection) */
+export const DEFAULT_MAX_CONCURRENT_RELEASES = 50;

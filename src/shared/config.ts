@@ -67,6 +67,21 @@ export interface EventConfig {
   /** ISO 8601 timestamp when event ends (optional, queue deactivates) */
   eventEndTime?: string;
 
+  /**
+   * Edge cache TTL in seconds for proxied origin responses.
+   * Cloudflare will cache the response at the edge for this duration.
+   * Set to 0 to disable edge caching (every request hits origin).
+   * @default 60
+   */
+  edgeCacheTtl: number;
+
+  /**
+   * Browser cache TTL in seconds (max-age in Cache-Control header).
+   * Set to 0 to tell browsers not to cache (must revalidate).
+   * @default 0
+   */
+  browserCacheTtl: number;
+
   /** Created timestamp */
   createdAt: string;
 
@@ -83,6 +98,8 @@ export const DEFAULT_EVENT_CONFIG: Omit<EventConfig, "eventId" | "name" | "prote
   failMode: "open",
   turnstileEnabled: false,
   maxQueueSize: 0,
+  edgeCacheTtl: 60,
+  browserCacheTtl: 0,
 };
 
 /** Fields required when creating a new event */
@@ -102,6 +119,8 @@ export interface CreateEventInput {
   maxQueueSize?: number;
   eventStartTime?: string;
   eventEndTime?: string;
+  edgeCacheTtl?: number;
+  browserCacheTtl?: number;
 }
 
 /** Fields allowed when updating an event */
@@ -163,9 +182,126 @@ export function validateCreateEvent(input: unknown): { valid: true; data: Create
     errors.mode = 'mode must be "always" or "threshold"';
   }
 
+  // Validate ISO 8601 date strings if provided
+  if (data.eventStartTime !== undefined) {
+    if (typeof data.eventStartTime !== "string" || isNaN(new Date(data.eventStartTime).getTime())) {
+      errors.eventStartTime = "eventStartTime must be a valid ISO 8601 date string";
+    }
+  }
+
+  if (data.eventEndTime !== undefined) {
+    if (typeof data.eventEndTime !== "string" || isNaN(new Date(data.eventEndTime).getTime())) {
+      errors.eventEndTime = "eventEndTime must be a valid ISO 8601 date string";
+    }
+  }
+
+  if (data.edgeCacheTtl !== undefined) {
+    if (typeof data.edgeCacheTtl !== "number" || data.edgeCacheTtl < 0) {
+      errors.edgeCacheTtl = "edgeCacheTtl must be a non-negative number (seconds)";
+    }
+  }
+
+  if (data.browserCacheTtl !== undefined) {
+    if (typeof data.browserCacheTtl !== "number" || data.browserCacheTtl < 0) {
+      errors.browserCacheTtl = "browserCacheTtl must be a non-negative number (seconds)";
+    }
+  }
+
   if (Object.keys(errors).length > 0) {
     return { valid: false, errors };
   }
 
   return { valid: true, data: data as unknown as CreateEventInput };
+}
+
+/** Validate an UpdateEventInput, returning error messages per field */
+export function validateUpdateEvent(input: unknown): { valid: true; data: UpdateEventInput } | { valid: false; errors: Record<string, string> } {
+  const errors: Record<string, string> = {};
+
+  if (!input || typeof input !== "object") {
+    return { valid: false, errors: { _root: "Request body must be a JSON object" } };
+  }
+
+  const data = input as Record<string, unknown>;
+
+  // eventId cannot be changed via update
+  if (data.eventId !== undefined) {
+    errors.eventId = "eventId cannot be changed";
+  }
+
+  if (data.name !== undefined) {
+    if (typeof data.name !== "string" || data.name.length === 0) {
+      errors.name = "name must be a non-empty string";
+    }
+  }
+
+  if (data.protectedPaths !== undefined) {
+    if (!Array.isArray(data.protectedPaths) || data.protectedPaths.length === 0) {
+      errors.protectedPaths = "protectedPaths must be a non-empty array of strings";
+    } else if (data.protectedPaths.some((p: unknown) => typeof p !== "string")) {
+      errors.protectedPaths = "All protectedPaths must be strings";
+    }
+  }
+
+  if (data.originUrl !== undefined) {
+    if (typeof data.originUrl !== "string" || data.originUrl.length === 0) {
+      errors.originUrl = "originUrl must be a non-empty string";
+    } else {
+      try {
+        new URL(data.originUrl);
+      } catch {
+        errors.originUrl = "originUrl must be a valid URL";
+      }
+    }
+  }
+
+  if (data.releaseRate !== undefined) {
+    if (typeof data.releaseRate !== "number" || data.releaseRate < 0) {
+      errors.releaseRate = "releaseRate must be a non-negative number";
+    }
+  }
+
+  if (data.tokenTtlSeconds !== undefined) {
+    if (typeof data.tokenTtlSeconds !== "number" || data.tokenTtlSeconds < 60) {
+      errors.tokenTtlSeconds = "tokenTtlSeconds must be at least 60";
+    }
+  }
+
+  if (data.failMode !== undefined && data.failMode !== "open" && data.failMode !== "closed") {
+    errors.failMode = 'failMode must be "open" or "closed"';
+  }
+
+  if (data.mode !== undefined && data.mode !== "always" && data.mode !== "threshold") {
+    errors.mode = 'mode must be "always" or "threshold"';
+  }
+
+  if (data.eventStartTime !== undefined) {
+    if (typeof data.eventStartTime !== "string" || isNaN(new Date(data.eventStartTime).getTime())) {
+      errors.eventStartTime = "eventStartTime must be a valid ISO 8601 date string";
+    }
+  }
+
+  if (data.eventEndTime !== undefined) {
+    if (typeof data.eventEndTime !== "string" || isNaN(new Date(data.eventEndTime).getTime())) {
+      errors.eventEndTime = "eventEndTime must be a valid ISO 8601 date string";
+    }
+  }
+
+  if (data.edgeCacheTtl !== undefined) {
+    if (typeof data.edgeCacheTtl !== "number" || data.edgeCacheTtl < 0) {
+      errors.edgeCacheTtl = "edgeCacheTtl must be a non-negative number (seconds)";
+    }
+  }
+
+  if (data.browserCacheTtl !== undefined) {
+    if (typeof data.browserCacheTtl !== "number" || data.browserCacheTtl < 0) {
+      errors.browserCacheTtl = "browserCacheTtl must be a non-negative number (seconds)";
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    return { valid: false, errors };
+  }
+
+  return { valid: true, data: data as unknown as UpdateEventInput };
 }

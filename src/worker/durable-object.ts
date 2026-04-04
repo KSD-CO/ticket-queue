@@ -52,6 +52,7 @@ import {
   MAX_VISITORS_PER_DO,
   SIGNING_KEY_PREFIX,
   EVENT_CONFIG_PREFIX,
+  DEFAULT_MAX_CONCURRENT_RELEASES,
 } from "../shared/constants.js";
 import { signToken, type QueueTokenClaims } from "../shared/jwt.js";
 import {
@@ -60,6 +61,34 @@ import {
   type ServerMessage,
 } from "../shared/messages.js";
 import type { EventConfig } from "../shared/config.js";
+
+/** Generate a short HMAC-based poll token for a visitor (for HTTP polling authentication) */
+async function generatePollToken(visitorId: string, signingKey: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(signingKey),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode("poll:" + visitorId));
+  // Return first 16 bytes as hex for a compact token
+  const bytes = new Uint8Array(sig).slice(0, 16);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** Verify a poll token for a visitor */
+async function verifyPollToken(visitorId: string, token: string, signingKey: string): Promise<boolean> {
+  const expected = await generatePollToken(visitorId, signingKey);
+  // Constant-time comparison
+  if (token.length !== expected.length) return false;
+  let result = 0;
+  for (let i = 0; i < token.length; i++) {
+    result |= token.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return result === 0;
+}
 
 interface Env {
   CONFIG_KV: KVNamespace;
@@ -133,10 +162,30 @@ export class QueueDurableObject extends DurableObject<Env> {
   private async loadSigningKey(eventId: string): Promise<string | null> {
     if (this.signingKey) return this.signingKey;
 
-    const key = await this.env.CONFIG_KV.get(`${SIGNING_KEY_PREFIX}${eventId}`);
-    if (key) {
-      this.signingKey = key;
+    const raw = await this.env.CONFIG_KV.get(`${SIGNING_KEY_PREFIX}${eventId}`);
+    if (!raw) return null;
+
+    // Support both legacy (plain string) and new (JSON array) formats
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        // New format: array of {key, active, createdAt} — use the active key for signing
+        const active = (parsed as { key: string; active: boolean }[]).find((k) => k.active);
+        if (active) {
+          this.signingKey = active.key;
+          return this.signingKey;
+        }
+        // No active key — use the last one as fallback
+        const last = parsed[parsed.length - 1] as { key: string } | undefined;
+        this.signingKey = last?.key ?? null;
+        return this.signingKey;
+      }
+    } catch {
+      // Not JSON — treat as legacy plain string key
     }
+
+    // Legacy format: plain string
+    this.signingKey = raw;
     return this.signingKey;
   }
 
@@ -170,6 +219,11 @@ export class QueueDurableObject extends DurableObject<Env> {
     // Stats endpoint (called by admin Worker)
     if (url.pathname === "/stats") {
       return this.handleStats();
+    }
+
+    // Individual visitor status (called by poll endpoint with HMAC auth)
+    if (url.pathname === "/visitor-status") {
+      return this.handleVisitorStatus(url);
     }
 
     // Reload config
@@ -215,7 +269,7 @@ export class QueueDurableObject extends DurableObject<Env> {
 
     switch (msg.type) {
       case "join":
-        await this.handleJoin(ws, msg.visitorId);
+        await this.handleJoin(ws, msg.visitorId, msg.turnstileToken);
         break;
       case "ping":
         this.sendToSocket(ws, { type: "pong" });
@@ -246,7 +300,7 @@ export class QueueDurableObject extends DurableObject<Env> {
 
   // ── Join logic ──
 
-  private async handleJoin(ws: WebSocket, existingVisitorId?: string): Promise<void> {
+  private async handleJoin(ws: WebSocket, existingVisitorId?: string, turnstileToken?: string): Promise<void> {
     // Get event ID from the first tag or a stored value
     const eventId = this.getEventId();
     if (!eventId) {
@@ -277,6 +331,35 @@ export class QueueDurableObject extends DurableObject<Env> {
       return;
     }
 
+    // Check schedule — reject joins if event has not started or has ended
+    if (config.eventStartTime) {
+      const start = new Date(config.eventStartTime).getTime();
+      if (!isNaN(start) && Date.now() < start) {
+        this.sendToSocket(ws, { type: "error", code: "EVENT_INACTIVE", message: "Event has not started yet" });
+        return;
+      }
+    }
+    if (config.eventEndTime) {
+      const end = new Date(config.eventEndTime).getTime();
+      if (!isNaN(end) && Date.now() > end) {
+        this.sendToSocket(ws, { type: "error", code: "EVENT_INACTIVE", message: "Event has ended" });
+        return;
+      }
+    }
+
+    // Verify Cloudflare Turnstile token if enabled
+    if (config.turnstileEnabled && config.turnstileSecretKey) {
+      if (!turnstileToken) {
+        this.sendToSocket(ws, { type: "error", code: "TURNSTILE_REQUIRED", message: "Verification required" });
+        return;
+      }
+      const turnstileOk = await this.verifyTurnstile(turnstileToken, config.turnstileSecretKey);
+      if (!turnstileOk) {
+        this.sendToSocket(ws, { type: "error", code: "TURNSTILE_FAILED", message: "Verification failed. Please try again." });
+        return;
+      }
+    }
+
     // Check for reconnection
     if (existingVisitorId) {
       const existing = this.ctx.storage.sql.exec(
@@ -293,7 +376,6 @@ export class QueueDurableObject extends DurableObject<Env> {
         );
 
         // Tag this WebSocket with the visitor ID
-        this.ctx.setWebSocketAutoResponse(ws as unknown as Parameters<typeof this.ctx.setWebSocketAutoResponse>[0]);
         ws.serializeAttachment(existingVisitorId);
 
         // Send current position
@@ -359,14 +441,20 @@ export class QueueDurableObject extends DurableObject<Env> {
     // Tag WebSocket with visitor ID
     ws.serializeAttachment(visitorId);
 
-    // Send initial position
+    // Send initial position (with poll token for HTTP polling fallback)
     const queuePos = this.getQueuePosition(position);
+    let pollToken: string | undefined;
+    const secret = await this.loadSigningKey(eventId);
+    if (secret) {
+      pollToken = await generatePollToken(visitorId, secret);
+    }
     this.sendToSocket(ws, {
       type: "position",
       visitorId,
       position: queuePos.relativePosition,
       totalAhead: queuePos.totalAhead,
       estimatedWaitSeconds: this.estimateWaitSeconds(queuePos.totalAhead),
+      pollToken,
     });
 
     // Ensure alarm is scheduled for releases
@@ -408,6 +496,16 @@ export class QueueDurableObject extends DurableObject<Env> {
       return;
     }
 
+    // Check if event has ended — stop releasing but keep alarm for draining
+    if (config.eventEndTime) {
+      const end = new Date(config.eventEndTime).getTime();
+      if (!isNaN(end) && Date.now() > end) {
+        console.log(`[QueueDO] Event ${eventId} has ended, stopping releases`);
+        this.broadcastToAll({ type: "error", code: "EVENT_INACTIVE", message: "Event has ended" });
+        return; // Stop alarm — no more releases
+      }
+    }
+
     // Clean up disconnected visitors past grace period
     this.cleanupDisconnected();
 
@@ -419,8 +517,13 @@ export class QueueDurableObject extends DurableObject<Env> {
       return;
     }
 
-    // Calculate batch size: releaseRate is per minute, alarm fires every second
-    const batchSize = Math.max(1, Math.ceil(releaseRate / 60));
+    // Calculate batch size: releaseRate is per minute, alarm fires every second.
+    // Cap at DEFAULT_MAX_CONCURRENT_RELEASES to prevent origin stampede — even if
+    // releaseRate is very high, we never release more than this many per tick.
+    const batchSize = Math.min(
+      Math.max(1, Math.ceil(releaseRate / 60)),
+      DEFAULT_MAX_CONCURRENT_RELEASES,
+    );
 
     // Get next visitors to release (FIFO by position)
     const toRelease = this.ctx.storage.sql.exec(
@@ -507,6 +610,58 @@ export class QueueDurableObject extends DurableObject<Env> {
       totalVisitors: totalCount?.cnt ?? 0,
       averageWaitMs: avgWait?.avg_ms ?? null,
       webSocketConnections: wsConnections,
+    });
+  }
+
+  /** Handle individual visitor status for HTTP polling with HMAC auth */
+  private async handleVisitorStatus(url: URL): Promise<Response> {
+    const visitorId = url.searchParams.get("visitor_id");
+    const pollToken = url.searchParams.get("poll_token");
+
+    if (!visitorId || !pollToken) {
+      return Response.json({ error: "Missing visitor_id or poll_token" }, { status: 400 });
+    }
+
+    // Verify the HMAC poll token
+    const eventId = this.getEventId();
+    if (!eventId) {
+      return Response.json({ error: "No event configured" }, { status: 404 });
+    }
+
+    const signingKey = await this.loadSigningKey(eventId);
+    if (!signingKey) {
+      return Response.json({ error: "Signing key not available" }, { status: 500 });
+    }
+
+    const isValid = await verifyPollToken(visitorId, pollToken, signingKey);
+    if (!isValid) {
+      return Response.json({ error: "Invalid poll token" }, { status: 403 });
+    }
+
+    // Look up visitor
+    const rows = this.ctx.storage.sql.exec(
+      "SELECT * FROM visitors WHERE visitor_id = ?",
+      visitorId,
+    ).toArray() as unknown as VisitorRecord[];
+
+    if (rows.length === 0) {
+      return Response.json({ error: "Visitor not found" }, { status: 404 });
+    }
+
+    const visitor = rows[0]!;
+
+    // Already released — return the token
+    if (visitor.released_at !== null && visitor.token) {
+      return Response.json({ status: "released", token: visitor.token });
+    }
+
+    // Still in queue — return position
+    const pos = this.getQueuePosition(visitor.position);
+    return Response.json({
+      status: "waiting",
+      position: pos.relativePosition,
+      totalAhead: pos.totalAhead,
+      estimatedWaitSeconds: this.estimateWaitSeconds(pos.totalAhead),
     });
   }
 
@@ -627,6 +782,37 @@ export class QueueDurableObject extends DurableObject<Env> {
         totalAhead: pos.totalAhead,
         estimatedWaitSeconds: this.estimateWaitSeconds(pos.totalAhead),
       });
+    }
+  }
+
+  /**
+   * Verify a Cloudflare Turnstile token via the siteverify API.
+   * Fails open: if the API is unreachable or errors, returns true (allow visitor).
+   */
+  private async verifyTurnstile(token: string, secretKey: string): Promise<boolean> {
+    try {
+      const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ secret: secretKey, response: token }),
+      });
+
+      if (!response.ok) {
+        // Turnstile API error — fail open
+        console.error(`[QueueDO] Turnstile API returned ${response.status}, allowing visitor (fail-open)`);
+        return true;
+      }
+
+      const result = (await response.json()) as { success: boolean };
+      if (!result.success) {
+        console.log("[QueueDO] Turnstile verification failed (invalid token)");
+        return false;
+      }
+      return true;
+    } catch (e) {
+      // Network error / timeout — fail open
+      console.error("[QueueDO] WARNING: Turnstile verification error, allowing visitor (fail-open):", e);
+      return true;
     }
   }
 

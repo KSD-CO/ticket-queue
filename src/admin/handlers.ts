@@ -5,6 +5,7 @@
 import type { Context } from "hono";
 import {
   validateCreateEvent,
+  validateUpdateEvent,
   DEFAULT_EVENT_CONFIG,
   type EventConfig,
   type UpdateEventInput,
@@ -193,7 +194,14 @@ export async function updateEvent(c: AdminContext): Promise<Response> {
   }
 
   const existing = JSON.parse(raw) as EventConfig;
-  const updates = (await c.req.json()) as UpdateEventInput;
+  const body = await c.req.json().catch(() => null);
+  const validation = validateUpdateEvent(body);
+
+  if (!validation.valid) {
+    throw new ValidationError("Invalid update data", validation.errors);
+  }
+
+  const updates = validation.data;
 
   // Merge updates
   const updated: EventConfig = {
@@ -299,4 +307,85 @@ export async function getStats(c: AdminContext): Promise<Response> {
   const stats = (await response.json()) as Record<string, unknown>;
 
   return c.json({ eventId, ...stats });
+}
+
+// ── Key Rotation ──
+
+/** A signing key entry in the key array stored in KV */
+interface SigningKeyEntry {
+  key: string;
+  active: boolean;
+  createdAt: string;
+}
+
+/** Maximum number of keys to keep (active + retired) */
+const MAX_SIGNING_KEYS = 3;
+
+/**
+ * Parse signing keys from KV. Handles both legacy format (plain string)
+ * and new format (JSON array of SigningKeyEntry).
+ */
+export function parseSigningKeys(raw: string): SigningKeyEntry[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed as SigningKeyEntry[];
+    }
+  } catch {
+    // Not JSON — treat as legacy plain string key
+  }
+  // Legacy format: plain string → wrap in array
+  return [{ key: raw, active: true, createdAt: new Date().toISOString() }];
+}
+
+/** Get the active signing key from a key array */
+export function getActiveSigningKey(keys: SigningKeyEntry[]): string | null {
+  const active = keys.find((k) => k.active);
+  return active?.key ?? null;
+}
+
+/** POST /api/events/:id/rotate-key — rotate the signing key */
+export async function rotateKey(c: AdminContext): Promise<Response> {
+  const eventId = c.req.param("id")!;
+  const configRaw = await c.env.CONFIG_KV.get(`${EVENT_CONFIG_PREFIX}${eventId}`);
+
+  if (!configRaw) {
+    throw new EventNotFoundError(eventId);
+  }
+
+  // Read current keys
+  const keyRaw = await c.env.CONFIG_KV.get(`${SIGNING_KEY_PREFIX}${eventId}`);
+  const keys = keyRaw ? parseSigningKeys(keyRaw) : [];
+
+  // Demote all current active keys
+  for (const k of keys) {
+    k.active = false;
+  }
+
+  // Generate new active key
+  const newKey: SigningKeyEntry = {
+    key: crypto.randomUUID() + crypto.randomUUID(),
+    active: true,
+    createdAt: new Date().toISOString(),
+  };
+  keys.push(newKey);
+
+  // Trim to max keys (keep newest, drop oldest inactive)
+  while (keys.length > MAX_SIGNING_KEYS) {
+    const oldestInactiveIdx = keys.findIndex((k) => !k.active);
+    if (oldestInactiveIdx >= 0) {
+      keys.splice(oldestInactiveIdx, 1);
+    } else {
+      break;
+    }
+  }
+
+  // Store updated keys
+  await c.env.CONFIG_KV.put(`${SIGNING_KEY_PREFIX}${eventId}`, JSON.stringify(keys));
+
+  // Notify DO to reload signing key
+  notifyDO(c, eventId);
+
+  console.log(`[Admin] Rotated signing key for event ${eventId} (${keys.length} keys active)`);
+  return c.json({ eventId, keyCount: keys.length, rotatedAt: newKey.createdAt });
 }

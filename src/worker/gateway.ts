@@ -4,15 +4,26 @@
 // Decision tree:
 //   Request ──▶ has token cookie?
 //     ├── YES ──▶ verify token
-//     │   ├── valid ──▶ proxy to origin
-//     │   ├── expired (within grace) ──▶ proxy to origin
+//     │   ├── valid + schedule OK ──▶ proxy to origin (edge cached)
+//     │   ├── expired (within grace) ──▶ proxy to origin (edge cached)
 //     │   ├── expired (past grace) ──▶ redirect to queue
 //     │   └── malformed/bad sig ──▶ redirect to queue
 //     └── NO ──▶ match protected path?
-//         ├── YES ──▶ redirect to queue page
+//         ├── YES ──▶ check schedule
+//         │   ├── not started yet ──▶ 403 (event not started)
+//         │   ├── ended ──▶ pass through (edge cached)
+//         │   └── active ──▶ redirect to queue page
 //         └── NO ──▶ pass through (not protected)
 //
-// Fail-open: if DO or KV is unreachable, proxy to origin anyway
+// Edge caching (origin protection):
+//   proxyToOrigin uses Cloudflare's cf.cacheTtl + cf.cacheEverything
+//   so the first visitor's origin fetch is cached at the edge.
+//   Subsequent visitors for the same URL hit the edge, not origin.
+//   Config: edgeCacheTtl (default 60s), browserCacheTtl (default 0s).
+//
+// Fail mode:
+//   "open"   → if DO or KV is unreachable, proxy to origin
+//   "closed" → if DO or KV is unreachable, return 503
 // ============================================================
 
 import type { Context } from "hono";
@@ -23,9 +34,11 @@ import {
   EVENT_CONFIG_PREFIX,
   SIGNING_KEY_PREFIX,
   PATH_INDEX_KEY,
+  DEFAULT_EDGE_CACHE_TTL,
+  DEFAULT_BROWSER_CACHE_TTL,
 } from "../shared/constants.js";
-import { TokenExpiredError } from "../shared/errors.js";
-import type { EventConfig } from "../shared/config.js";
+import { TokenExpiredError, TokenSignatureError } from "../shared/errors.js";
+import type { EventConfig, FailMode } from "../shared/config.js";
 
 interface GatewayEnv {
   CONFIG_KV: KVNamespace;
@@ -99,6 +112,102 @@ function matchPath(path: string, pattern: string): boolean {
   return false;
 }
 
+/**
+ * Check if an event is within its active schedule window.
+ * @returns "active" | "not_started" | "ended"
+ */
+function checkSchedule(config: EventConfig): "active" | "not_started" | "ended" {
+  const now = Date.now();
+
+  if (config.eventStartTime) {
+    const start = new Date(config.eventStartTime).getTime();
+    if (!isNaN(start) && now < start) {
+      return "not_started";
+    }
+  }
+
+  if (config.eventEndTime) {
+    const end = new Date(config.eventEndTime).getTime();
+    if (!isNaN(end) && now > end) {
+      return "ended";
+    }
+  }
+
+  return "active";
+}
+
+/**
+ * Handle a system failure according to the event's failMode.
+ * "open" → proxy to origin (default). "closed" → return 503.
+ */
+function handleFailure(
+  request: Request,
+  failMode: FailMode | undefined,
+  originUrl: string | undefined,
+  reason: string,
+): Promise<Response> | Response {
+  const mode = failMode ?? "open";
+  if (mode === "closed") {
+    console.error(`[Gateway] fail-closed: ${reason}`);
+    return new Response("Service Temporarily Unavailable", {
+      status: 503,
+      headers: { "Retry-After": "30" },
+    });
+  }
+  // fail-open
+  if (originUrl) {
+    return proxyToOrigin(request, originUrl);
+  }
+  return fetch(request);
+}
+
+/**
+ * Load all signing keys from KV. Supports both legacy (plain string)
+ * and new (JSON array) formats for backward compatibility.
+ */
+function parseSigningKeysFromRaw(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      return (parsed as { key: string }[]).map((k) => k.key);
+    }
+  } catch {
+    // Not JSON — legacy plain string
+  }
+  return [raw];
+}
+
+/**
+ * Verify a token against all available signing keys.
+ * Returns claims on first successful verification.
+ * Throws the error from the last key attempt on total failure.
+ */
+async function verifyTokenWithKeys(
+  token: string,
+  keys: string[],
+  gracePeriodSeconds: number,
+): ReturnType<typeof verifyToken> {
+  let lastError: unknown;
+  for (const key of keys) {
+    try {
+      return await verifyToken(token, key, gracePeriodSeconds);
+    } catch (e) {
+      lastError = e;
+      // If the token is expired, it's expired regardless of which key we use
+      if (e instanceof TokenExpiredError) {
+        throw e;
+      }
+      // TokenSignatureError → try next key
+      if (e instanceof TokenSignatureError) {
+        continue;
+      }
+      // Any other error (parse error) → no point trying other keys
+      throw e;
+    }
+  }
+  throw lastError;
+}
+
 /** Main gateway handler */
 export async function handleGateway(
   c: Context<{ Bindings: GatewayEnv }>,
@@ -128,23 +237,40 @@ async function handleWithToken(
   token: string,
   path: string,
 ): Promise<Response> {
+  // Hoist config lookup so it's available in the catch block
+  let config: EventConfig | null = null;
   try {
-    // Find the event config to get the signing key
-    const config = await findEventForPath(path, c.env.CONFIG_KV);
-    if (!config) {
-      // Path not protected, pass through even though token exists
-      return fetch(request);
+    config = await findEventForPath(path, c.env.CONFIG_KV);
+  } catch (e) {
+    // KV error — handle based on failMode (unknown here, default open)
+    console.error("[Gateway] KV error looking up config, failing open:", e);
+    return fetch(request);
+  }
+
+  if (!config) {
+    // Path not protected, pass through even though token exists
+    return fetch(request);
+  }
+
+  // Check schedule — event may have ended
+  const schedule = checkSchedule(config);
+  if (schedule === "ended") {
+    // Event is over — pass through, no queue needed
+    return proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
+  }
+
+  try {
+    const signingKeyRaw = await c.env.CONFIG_KV.get(`${SIGNING_KEY_PREFIX}${config.eventId}`);
+    if (!signingKeyRaw) {
+      // Signing key missing — CRITICAL, handle per failMode
+      return handleFailure(request, config.failMode, config.originUrl, `Signing key missing for event ${config.eventId}`);
     }
 
-    const signingKey = await c.env.CONFIG_KV.get(`${SIGNING_KEY_PREFIX}${config.eventId}`);
-    if (!signingKey) {
-      // Signing key missing — CRITICAL but fail-open
-      console.error(`[Gateway] Signing key missing for event ${config.eventId}, failing open`);
-      return proxyToOrigin(request, config.originUrl);
-    }
+    // Parse all signing keys (supports legacy string + new JSON array format)
+    const keys = parseSigningKeysFromRaw(signingKeyRaw);
 
-    // Verify token with grace period
-    const claims = await verifyToken(token, signingKey, TOKEN_GRACE_PERIOD_SECONDS);
+    // Verify token against all available keys (key rotation support)
+    const claims = await verifyTokenWithKeys(token, keys, TOKEN_GRACE_PERIOD_SECONDS);
 
     // Verify the token is for the right event
     if (claims.evt !== config.eventId) {
@@ -153,24 +279,15 @@ async function handleWithToken(
     }
 
     // Valid token — proxy to origin
-    return proxyToOrigin(request, config.originUrl);
+    return proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
   } catch (e) {
     if (e instanceof TokenExpiredError) {
       // Past grace period — need to re-queue
-      const config = await findEventForPath(path, c.env.CONFIG_KV);
-      if (config) {
-        return redirectToQueue(c, config.eventId);
-      }
-    }
-
-    // Any other error (malformed, bad sig) — redirect to queue
-    const config = await findEventForPath(path, c.env.CONFIG_KV);
-    if (config) {
       return redirectToQueue(c, config.eventId);
     }
 
-    // Can't find config — fail open
-    return fetch(request);
+    // Any other error (malformed, bad sig) — redirect to queue
+    return redirectToQueue(c, config.eventId);
   }
 }
 
@@ -179,21 +296,36 @@ async function handleWithoutToken(
   request: Request,
   path: string,
 ): Promise<Response> {
+  let config: EventConfig | null = null;
   try {
-    const config = await findEventForPath(path, c.env.CONFIG_KV);
-
-    if (!config) {
-      // Not a protected path — pass through
-      return fetch(request);
-    }
-
-    // Protected path, no token — redirect to queue
-    return redirectToQueue(c, config.eventId);
+    config = await findEventForPath(path, c.env.CONFIG_KV);
   } catch (e) {
-    // KV or DO error — fail open
-    console.error("[Gateway] Error checking event config, failing open:", e);
+    // KV or DO error — handle per failMode (unknown, default open)
+    console.error("[Gateway] Error checking event config:", e);
     return fetch(request);
   }
+
+  if (!config) {
+    // Not a protected path — pass through
+    return fetch(request);
+  }
+
+  // Check schedule
+  const schedule = checkSchedule(config);
+  if (schedule === "not_started") {
+    console.log(`[Gateway] Event ${config.eventId} not started yet (starts ${config.eventStartTime})`);
+    return new Response("Event has not started yet. Please come back later.", {
+      status: 403,
+      headers: { "Content-Type": "text/plain" },
+    });
+  }
+  if (schedule === "ended") {
+    // Event is over — pass through, no queue needed
+    return proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
+  }
+
+  // Protected path, active event, no token — redirect to queue
+  return redirectToQueue(c, config.eventId);
 }
 
 function redirectToQueue(c: Context, eventId: string): Response {
@@ -208,22 +340,82 @@ function redirectToQueue(c: Context, eventId: string): Response {
   return c.redirect(queueUrl.toString(), 302);
 }
 
-async function proxyToOrigin(request: Request, originUrl: string): Promise<Response> {
+/**
+ * Proxy a request to the origin server with Cloudflare edge caching.
+ *
+ * Cache strategy:
+ *   - `cf.cacheTtl` tells Cloudflare's CDN how long to cache the response at the edge.
+ *     Multiple visitors hitting the same URL within this window are served from cache.
+ *   - `cf.cacheEverything` ensures even HTML responses are cached (by default CF only
+ *     caches static file extensions).
+ *   - `Cache-Control` header controls browser caching (max-age) and CDN revalidation.
+ *   - `CDN-Cache-Control` overrides Cache-Control for Cloudflare specifically, so we can
+ *     have a long edge TTL but short browser TTL (visitors always revalidate with edge).
+ *
+ * @param request - The original visitor request
+ * @param originUrl - The origin server base URL
+ * @param edgeCacheTtl - Seconds to cache at Cloudflare edge (0 = no edge cache)
+ * @param browserCacheTtl - Seconds for browser Cache-Control max-age (0 = no-store)
+ */
+async function proxyToOrigin(
+  request: Request,
+  originUrl: string,
+  edgeCacheTtl?: number,
+  browserCacheTtl?: number,
+): Promise<Response> {
   const url = new URL(request.url);
   const origin = new URL(originUrl);
   url.hostname = origin.hostname;
   url.protocol = origin.protocol;
   url.port = origin.port;
 
+  const effectiveEdgeTtl = edgeCacheTtl ?? DEFAULT_EDGE_CACHE_TTL;
+  const effectiveBrowserTtl = browserCacheTtl ?? DEFAULT_BROWSER_CACHE_TTL;
+
+  // Build Cloudflare-specific fetch options for edge caching
+  // Only apply cf caching for GET/HEAD requests (mutations must not be cached)
+  const isGetOrHead = request.method === "GET" || request.method === "HEAD";
+  const cfOptions: Record<string, unknown> = {};
+  if (isGetOrHead && effectiveEdgeTtl > 0) {
+    cfOptions.cacheTtl = effectiveEdgeTtl;
+    cfOptions.cacheEverything = true;
+  }
+
   const proxyRequest = new Request(url.toString(), {
     method: request.method,
     headers: request.headers,
     body: request.body,
     redirect: "follow",
+    cf: Object.keys(cfOptions).length > 0 ? cfOptions : undefined,
   });
 
   try {
-    return await fetch(proxyRequest);
+    const response = await fetch(proxyRequest);
+
+    // Clone response so we can modify headers
+    const newHeaders = new Headers(response.headers);
+
+    if (isGetOrHead) {
+      // Set browser cache control
+      if (effectiveBrowserTtl > 0) {
+        newHeaders.set("Cache-Control", `public, max-age=${effectiveBrowserTtl}`);
+      } else {
+        // No browser cache — force revalidation with edge
+        newHeaders.set("Cache-Control", "public, max-age=0, must-revalidate");
+      }
+
+      // CDN-Cache-Control overrides Cache-Control for Cloudflare's edge
+      // This lets us have a long edge TTL even when browser TTL is 0
+      if (effectiveEdgeTtl > 0) {
+        newHeaders.set("CDN-Cache-Control", `public, max-age=${effectiveEdgeTtl}`);
+      }
+    }
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
+    });
   } catch (e) {
     console.error("[Gateway] Origin proxy failed:", e);
     return new Response("Bad Gateway", { status: 502 });

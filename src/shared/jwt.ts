@@ -9,6 +9,13 @@
 //   5. Gateway calls verify() on each request
 //   6. Valid → proxy to origin. Invalid → redirect to queue.
 //
+// Key rotation:
+//   Signing keys are stored in KV as either a plain string
+//   (legacy) or a JSON array of { key, active, createdAt }.
+//   The DO signs with the active key. The gateway verifies
+//   against ALL keys so tokens signed with a retired key
+//   remain valid until they expire naturally.
+//
 // Token format (standard JWT):
 //   header.payload.signature
 //   │       │         │

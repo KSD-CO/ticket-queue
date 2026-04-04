@@ -7,6 +7,11 @@
 //   3. queue.js opens WebSocket to DO via /queue/ws
 //   4. DO assigns position, pushes updates
 //   5. When released, client receives token and redirects
+//
+// Cache strategy:
+//   - Queue HTML: no-store (dynamic — contains injected event ID)
+//   - Static assets (queue.js, queue.css): long Cache-Control
+//     (same content for all events, safe to cache aggressively)
 // ============================================================
 
 import type { Context } from "hono";
@@ -38,14 +43,19 @@ export async function handleQueuePage(
       let html = await assetResponse.text();
       html = html.replaceAll("{{EVENT_ID}}", eventId);
       html = html.replaceAll("{{RETURN_URL}}", encodeURIComponent(returnUrl));
-      return c.html(html);
+      // No browser cache — HTML is dynamic (contains injected event/return data)
+      return c.html(html, 200, {
+        "Cache-Control": "no-store",
+      });
     }
   } catch {
     // Fall through to inline HTML
   }
 
-  // Inline fallback queue page
-  return c.html(getInlineQueuePage(eventId, returnUrl));
+  // Inline fallback queue page (also no-cache)
+  return c.html(getInlineQueuePage(eventId, returnUrl), 200, {
+    "Cache-Control": "no-store",
+  });
 }
 
 /** Handle WebSocket upgrade to Durable Object */
@@ -79,15 +89,29 @@ export async function handleQueuePoll(
 ): Promise<Response> {
   const eventId = c.req.query("event");
   const visitorId = c.req.query("visitor_id");
+  const pollToken = c.req.query("poll_token");
 
   if (!eventId) {
     return c.json({ error: "Missing event parameter" }, 400);
   }
 
-  // Route to DO for stats
+  // Route to DO
   const doId = c.env.QUEUE_DO.idFromName(eventId);
   const doStub = c.env.QUEUE_DO.get(doId);
 
+  // If visitor_id and poll_token are provided, request individual visitor status
+  if (visitorId && pollToken) {
+    const pollUrl = new URL(c.req.url);
+    pollUrl.pathname = "/visitor-status";
+    pollUrl.search = "";
+    pollUrl.searchParams.set("visitor_id", visitorId);
+    pollUrl.searchParams.set("poll_token", pollToken);
+
+    const response = await doStub.fetch(new Request(pollUrl.toString()));
+    return response;
+  }
+
+  // Otherwise return aggregate stats
   const statsUrl = new URL(c.req.url);
   statsUrl.pathname = "/stats";
 
@@ -159,16 +183,18 @@ function getInlineQueuePage(eventId: string, returnUrl: string): string {
   </div>
 
   <script>
-    const EVENT_ID = "${eventId}";
-    const RETURN_URL = decodeURIComponent("${encodeURIComponent(returnUrl)}");
+    const EVENT_ID = ${JSON.stringify(eventId)};
+    const RETURN_URL = decodeURIComponent(${JSON.stringify(encodeURIComponent(returnUrl))});
     const COOKIE_NAME = "__queue_token";
     const VISITOR_ID_KEY = "queue_visitor_" + EVENT_ID;
 
     let ws = null;
     let reconnectAttempts = 0;
     let initialPosition = null;
+    let heartbeatTimer = null;
 
     function connect() {
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const url = proto + "//" + location.host + "/queue/ws?event=" + EVENT_ID;
       ws = new WebSocket(url);
@@ -256,7 +282,7 @@ function getInlineQueuePage(eventId: string, returnUrl: string): string {
       };
 
       // Heartbeat
-      setInterval(function() {
+      heartbeatTimer = setInterval(function() {
         if (ws && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "ping" }));
         }

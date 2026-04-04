@@ -7,12 +7,16 @@
 //     { type: "ping" }
 //
 //   DO ──▶ Client:
-//     { type: "position", position, totalAhead, estimatedWaitSeconds }
+//     { type: "position", position, totalAhead, estimatedWaitSeconds, pollToken? }
 //     { type: "released", token }
 //     { type: "pong" }
 //     { type: "error", code, message }
 //     { type: "paused" }
 //     { type: "queue_full" }
+//
+// The initial "position" message includes a pollToken (HMAC-based)
+// that the client can use for HTTP polling fallback via
+// GET /queue/poll?event=...&visitor_id=...&poll_token=...
 // ============================================================
 
 // ── Client → Server messages ──
@@ -43,6 +47,8 @@ export interface PositionMessage {
   totalAhead: number;
   /** Estimated wait time in seconds (based on release rate) */
   estimatedWaitSeconds: number;
+  /** HMAC poll token for HTTP polling authentication (sent on first position update) */
+  pollToken?: string;
 }
 
 export interface ReleasedMessage {

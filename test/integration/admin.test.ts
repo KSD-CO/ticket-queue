@@ -283,7 +283,7 @@ describe("Admin API Integration", () => {
       expect(body.eventId).toBe(input.eventId);
     });
 
-    test("preserves immutable fields (eventId, createdAt)", async () => {
+    test("rejects update that attempts to change eventId", async () => {
       const input = makeEventInput();
       await adminFetch("/api/events", {
         method: "POST",
@@ -296,8 +296,29 @@ describe("Admin API Integration", () => {
         headers: authHeaders(),
         body: JSON.stringify({ eventId: "hijacked-id", name: "Updated" }),
       });
-      const body = (await res.json()) as { eventId: string };
-      expect(body.eventId).toBe(input.eventId); // not "hijacked-id"
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { fields: Record<string, string> };
+      expect(body.fields.eventId).toBe("eventId cannot be changed");
+    });
+
+    test("preserves eventId and createdAt on valid update", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      const res = await adminFetch(`/api/events/${input.eventId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ name: "Updated" }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { eventId: string; createdAt: string; name: string };
+      expect(body.eventId).toBe(input.eventId);
+      expect(body.createdAt).toBeDefined();
+      expect(body.name).toBe("Updated");
     });
 
     test("returns 404 for non-existent event", async () => {
@@ -424,6 +445,152 @@ describe("Admin API Integration", () => {
         headers: authHeaders(),
       });
       expect(res.status).toBe(500);
+    });
+  });
+
+  // ── Key Rotation ──
+
+  describe("POST /api/events/:id/rotate-key", () => {
+    test("rotates the signing key for an event", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      // Get the original signing key
+      const originalKey = await env.CONFIG_KV.get(`signing_key:${input.eventId}`);
+      expect(originalKey).not.toBeNull();
+
+      // Rotate the key
+      const res = await adminFetch(`/api/events/${input.eventId}/rotate-key`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { eventId: string; keyCount: number; rotatedAt: string };
+      expect(body.eventId).toBe(input.eventId);
+      expect(body.keyCount).toBeGreaterThanOrEqual(2);
+      expect(body.rotatedAt).toBeDefined();
+
+      // Verify the key in KV is now JSON array format
+      const newKeyRaw = await env.CONFIG_KV.get(`signing_key:${input.eventId}`);
+      expect(newKeyRaw).not.toBeNull();
+      const keys = JSON.parse(newKeyRaw!) as { key: string; active: boolean }[];
+      expect(Array.isArray(keys)).toBe(true);
+      expect(keys.length).toBeGreaterThanOrEqual(2);
+
+      // Exactly one key should be active
+      const activeKeys = keys.filter((k) => k.active);
+      expect(activeKeys).toHaveLength(1);
+
+      // The active key should be different from the original
+      expect(activeKeys[0]!.key).not.toBe(originalKey);
+    });
+
+    test("caps at MAX_SIGNING_KEYS (3) after multiple rotations", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      // Rotate 4 times (original + 4 = 5, but capped at 3)
+      for (let i = 0; i < 4; i++) {
+        await adminFetch(`/api/events/${input.eventId}/rotate-key`, {
+          method: "POST",
+          headers: authHeaders(),
+        });
+      }
+
+      const raw = await env.CONFIG_KV.get(`signing_key:${input.eventId}`);
+      const keys = JSON.parse(raw!) as { key: string; active: boolean }[];
+      expect(keys.length).toBeLessThanOrEqual(3);
+      expect(keys.filter((k) => k.active)).toHaveLength(1);
+    });
+
+    test("returns 404 for non-existent event", async () => {
+      const res = await adminFetch("/api/events/ghost-event/rotate-key", {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // ── Update validation integration ──
+
+  describe("PUT /api/events/:id — validation", () => {
+    test("rejects negative releaseRate in update", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      const res = await adminFetch(`/api/events/${input.eventId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ releaseRate: -10 }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("rejects tokenTtlSeconds below 60 in update", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      const res = await adminFetch(`/api/events/${input.eventId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ tokenTtlSeconds: 30 }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("rejects invalid date strings in update", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      const res = await adminFetch(`/api/events/${input.eventId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ eventStartTime: "not-a-date" }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    test("accepts valid date strings in update", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      const res = await adminFetch(`/api/events/${input.eventId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          eventStartTime: "2025-06-01T10:00:00Z",
+          eventEndTime: "2025-06-01T23:00:00Z",
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { eventStartTime: string; eventEndTime: string };
+      expect(body.eventStartTime).toBe("2025-06-01T10:00:00Z");
+      expect(body.eventEndTime).toBe("2025-06-01T23:00:00Z");
     });
   });
 });
