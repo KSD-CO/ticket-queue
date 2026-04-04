@@ -343,14 +343,22 @@ function redirectToQueue(c: Context, eventId: string): Response {
 /**
  * Proxy a request to the origin server with Cloudflare edge caching.
  *
- * Cache strategy:
- *   - `cf.cacheTtl` tells Cloudflare's CDN how long to cache the response at the edge.
- *     Multiple visitors hitting the same URL within this window are served from cache.
- *   - `cf.cacheEverything` ensures even HTML responses are cached (by default CF only
- *     caches static file extensions).
- *   - `Cache-Control` header controls browser caching (max-age) and CDN revalidation.
- *   - `CDN-Cache-Control` overrides Cache-Control for Cloudflare specifically, so we can
- *     have a long edge TTL but short browser TTL (visitors always revalidate with edge).
+ * Cache strategy (two layers):
+ *
+ *   Layer 1 — Cache API (caches.default):
+ *     Workers running on the same zone as the origin can't rely on cf.cacheTtl
+ *     (the fetch stays internal and never traverses the CDN cache layer).
+ *     We explicitly use the Cache API to store/retrieve responses at the edge.
+ *     This works regardless of whether the origin is same-zone or external.
+ *
+ *   Layer 2 — cf.cacheTtl (fallback for external origins):
+ *     When the origin is on a different domain, cf.cacheTtl + cf.cacheEverything
+ *     provides a second layer of caching via the standard CDN pipeline.
+ *     Both layers can coexist; Cache API is checked first.
+ *
+ * Browser caching:
+ *   Cache-Control header controls browser max-age. Default 0 (no browser cache)
+ *   so browsers always revalidate with the edge — the edge serves from Cache API.
  *
  * @param request - The original visitor request
  * @param originUrl - The origin server base URL
@@ -371,17 +379,81 @@ async function proxyToOrigin(
 
   const effectiveEdgeTtl = edgeCacheTtl ?? DEFAULT_EDGE_CACHE_TTL;
   const effectiveBrowserTtl = browserCacheTtl ?? DEFAULT_BROWSER_CACHE_TTL;
-
-  // Build Cloudflare-specific fetch options for edge caching
-  // Only apply cf caching for GET/HEAD requests (mutations must not be cached)
   const isGetOrHead = request.method === "GET" || request.method === "HEAD";
-  const cfOptions: Record<string, unknown> = {};
+
+  // ── Layer 1: Cache API (works for same-zone AND external origins) ──
   if (isGetOrHead && effectiveEdgeTtl > 0) {
-    cfOptions.cacheTtl = effectiveEdgeTtl;
+    // Use the original request URL as cache key (not the rewritten origin URL)
+    // so all visitors for the same page URL share one cache entry.
+    const cacheKey = new Request(request.url, { method: request.method });
+    const cache = caches.default;
+
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      // Edge cache HIT — return immediately without hitting origin
+      const headers = new Headers(cached.headers);
+      headers.set("X-Cache-Status", "HIT");
+      return new Response(cached.body, {
+        status: cached.status,
+        statusText: cached.statusText,
+        headers,
+      });
+    }
+
+    // Edge cache MISS — fetch from origin, then cache the response
+    const originResponse = await fetchOrigin(request, url, effectiveEdgeTtl);
+    if (!originResponse.ok) {
+      // Don't cache error responses
+      return originResponse;
+    }
+
+    // Build the cacheable response with proper headers
+    const cacheHeaders = new Headers(originResponse.headers);
+    setBrowserCacheHeaders(cacheHeaders, effectiveBrowserTtl);
+    cacheHeaders.set("X-Cache-Status", "MISS");
+    // Cache-Control for the Cache API entry (edge TTL)
+    // This tells the Cache API when to expire this entry.
+    cacheHeaders.set("CDN-Cache-Control", `public, max-age=${effectiveEdgeTtl}`);
+
+    const responseToCache = new Response(originResponse.body, {
+      status: originResponse.status,
+      statusText: originResponse.statusText,
+      headers: cacheHeaders,
+    });
+
+    // Store in cache (non-blocking — don't wait for cache write)
+    // We must clone because the response body can only be read once.
+    const responseForClient = responseToCache.clone();
+    // cache.put is fire-and-forget; errors are silently ignored
+    cache.put(cacheKey, responseToCache).catch(() => {});
+
+    return responseForClient;
+  }
+
+  // ── Non-cacheable request (POST/PUT/DELETE or edgeTtl=0) ──
+  return fetchOrigin(request, url, 0);
+}
+
+/**
+ * Fetch from the origin server. Uses cf.cacheTtl as a fallback
+ * for external origins where the CDN pipeline is active.
+ */
+async function fetchOrigin(
+  request: Request,
+  originUrl: URL,
+  edgeCacheTtl: number,
+): Promise<Response> {
+  const isGetOrHead = request.method === "GET" || request.method === "HEAD";
+
+  // cf.cacheTtl works for external origins (different zone).
+  // For same-zone origins it's a no-op but harmless.
+  const cfOptions: Record<string, unknown> = {};
+  if (isGetOrHead && edgeCacheTtl > 0) {
+    cfOptions.cacheTtl = edgeCacheTtl;
     cfOptions.cacheEverything = true;
   }
 
-  const proxyRequest = new Request(url.toString(), {
+  const proxyRequest = new Request(originUrl.toString(), {
     method: request.method,
     headers: request.headers,
     body: request.body,
@@ -390,34 +462,19 @@ async function proxyToOrigin(
   });
 
   try {
-    const response = await fetch(proxyRequest);
-
-    // Clone response so we can modify headers
-    const newHeaders = new Headers(response.headers);
-
-    if (isGetOrHead) {
-      // Set browser cache control
-      if (effectiveBrowserTtl > 0) {
-        newHeaders.set("Cache-Control", `public, max-age=${effectiveBrowserTtl}`);
-      } else {
-        // No browser cache — force revalidation with edge
-        newHeaders.set("Cache-Control", "public, max-age=0, must-revalidate");
-      }
-
-      // CDN-Cache-Control overrides Cache-Control for Cloudflare's edge
-      // This lets us have a long edge TTL even when browser TTL is 0
-      if (effectiveEdgeTtl > 0) {
-        newHeaders.set("CDN-Cache-Control", `public, max-age=${effectiveEdgeTtl}`);
-      }
-    }
-
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders,
-    });
+    return await fetch(proxyRequest);
   } catch (e) {
-    console.error("[Gateway] Origin proxy failed:", e);
+    console.error("[Gateway] Origin fetch failed:", e);
     return new Response("Bad Gateway", { status: 502 });
+  }
+}
+
+/** Set browser-facing Cache-Control headers */
+function setBrowserCacheHeaders(headers: Headers, browserCacheTtl: number): void {
+  if (browserCacheTtl > 0) {
+    headers.set("Cache-Control", `public, max-age=${browserCacheTtl}`);
+  } else {
+    // No browser cache — force revalidation with edge on every request
+    headers.set("Cache-Control", "public, max-age=0, must-revalidate");
   }
 }
