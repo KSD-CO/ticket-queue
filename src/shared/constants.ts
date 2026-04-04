@@ -11,6 +11,12 @@ export const EVENT_CONFIG_PREFIX = "event:";
 /** KV key prefix for signing keys */
 export const SIGNING_KEY_PREFIX = "signing_key:";
 
+/** KV key for path→eventId lookup index (avoids KV.list) */
+export const PATH_INDEX_KEY = "_index:path_map";
+
+/** KV key for event ID list index (avoids KV.list) */
+export const EVENT_IDS_INDEX_KEY = "_index:event_ids";
+
 /** Default token TTL in seconds (30 minutes) */
 export const DEFAULT_TOKEN_TTL_SECONDS = 30 * 60;
 

@@ -108,7 +108,7 @@ export function TicketSelector({ tiers, eventSlug, queueEnabled, soldOut }: Tick
               </p>
             </div>
             <a
-              href={`/checkout?event=${eventSlug}&${Object.entries(quantities)
+              href={`/checkout/${eventSlug}?${Object.entries(quantities)
                 .filter(([, v]) => v > 0)
                 .map(([k, v]) => `${k}=${v}`)
                 .join("&")}`}

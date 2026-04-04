@@ -22,6 +22,7 @@ import {
   TOKEN_GRACE_PERIOD_SECONDS,
   EVENT_CONFIG_PREFIX,
   SIGNING_KEY_PREFIX,
+  PATH_INDEX_KEY,
 } from "../shared/constants.js";
 import { TokenExpiredError } from "../shared/errors.js";
 import type { EventConfig } from "../shared/config.js";
@@ -50,28 +51,39 @@ async function findEventForPath(
   path: string,
   kv: KVNamespace,
 ): Promise<EventConfig | null> {
-  // List all event configs and find one whose protectedPaths match
-  // In production, this should be cached. For now, use KV list.
-  const list = await kv.list({ prefix: EVENT_CONFIG_PREFIX });
+  // Read the path→eventId index (single KV.get, no KV.list)
+  const raw = await kv.get(PATH_INDEX_KEY);
+  if (!raw) return null;
 
-  for (const key of list.keys) {
-    const raw = await kv.get(key.name);
-    if (!raw) continue;
+  let pathMap: Record<string, string>;
+  try {
+    pathMap = JSON.parse(raw) as Record<string, string>;
+  } catch {
+    return null;
+  }
 
-    try {
-      const config = JSON.parse(raw) as EventConfig;
-      if (!config.enabled) continue;
-
-      for (const pattern of config.protectedPaths) {
-        if (matchPath(path, pattern)) {
-          return config;
-        }
-      }
-    } catch {
-      continue;
+  // Find the first matching path pattern
+  let matchedEventId: string | null = null;
+  for (const [pattern, eventId] of Object.entries(pathMap)) {
+    if (matchPath(path, pattern)) {
+      matchedEventId = eventId;
+      break;
     }
   }
-  return null;
+
+  if (!matchedEventId) return null;
+
+  // Fetch the full event config (single KV.get)
+  const configRaw = await kv.get(`${EVENT_CONFIG_PREFIX}${matchedEventId}`);
+  if (!configRaw) return null;
+
+  try {
+    const config = JSON.parse(configRaw) as EventConfig;
+    if (!config.enabled) return null;
+    return config;
+  } catch {
+    return null;
+  }
 }
 
 /** Simple path matching with wildcard support */

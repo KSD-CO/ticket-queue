@@ -12,6 +12,8 @@ import {
 import {
   EVENT_CONFIG_PREFIX,
   SIGNING_KEY_PREFIX,
+  PATH_INDEX_KEY,
+  EVENT_IDS_INDEX_KEY,
 } from "../shared/constants.js";
 import {
   EventNotFoundError,
@@ -25,6 +27,66 @@ interface AdminEnv {
 }
 
 type AdminContext = Context<{ Bindings: AdminEnv }>;
+
+// ── Index types ──
+
+/** path_map: { "/checkout": "event-id", "/checkout/*": "event-id" } */
+type PathMap = Record<string, string>;
+
+/** event_ids: ["event-id-1", "event-id-2"] */
+type EventIdList = string[];
+
+/** Read the path index from KV (or empty object if missing) */
+async function getPathIndex(kv: KVNamespace): Promise<PathMap> {
+  const raw = await kv.get(PATH_INDEX_KEY);
+  if (!raw) return {};
+  try { return JSON.parse(raw) as PathMap; } catch { return {}; }
+}
+
+/** Read the event IDs index from KV (or empty array if missing) */
+async function getEventIdsIndex(kv: KVNamespace): Promise<EventIdList> {
+  const raw = await kv.get(EVENT_IDS_INDEX_KEY);
+  if (!raw) return [];
+  try { return JSON.parse(raw) as EventIdList; } catch { return []; }
+}
+
+/**
+ * Rebuild both indexes from scratch by reading all event configs.
+ * Uses event_ids index to enumerate events (KV.get, not KV.list),
+ * then rebuilds path_map from all configs' protectedPaths.
+ */
+async function rebuildIndexes(kv: KVNamespace, action: "upsert" | "delete", eventId: string, config?: EventConfig): Promise<void> {
+  // Step 1: Update the event IDs list
+  const eventIds = await getEventIdsIndex(kv);
+  const filteredIds = eventIds.filter((id) => id !== eventId);
+  if (action === "upsert") {
+    filteredIds.push(eventId);
+  }
+
+  // Step 2: Rebuild path_map from all active event configs
+  const pathMap: PathMap = {};
+  const configs = await Promise.all(
+    filteredIds.map((id) => kv.get(`${EVENT_CONFIG_PREFIX}${id}`)),
+  );
+
+  for (const raw of configs) {
+    if (!raw) continue;
+    try {
+      const c = JSON.parse(raw) as EventConfig;
+      for (const p of c.protectedPaths) {
+        // First event to claim a path wins (no overwrite)
+        if (!pathMap[p]) {
+          pathMap[p] = c.eventId;
+        }
+      }
+    } catch { /* skip malformed */ }
+  }
+
+  await Promise.all([
+    kv.put(PATH_INDEX_KEY, JSON.stringify(pathMap)),
+    kv.put(EVENT_IDS_INDEX_KEY, JSON.stringify(filteredIds)),
+  ]);
+}
 
 /**
  * Best-effort notification to the Durable Object to reload config.
@@ -76,6 +138,9 @@ export async function createEvent(c: AdminContext): Promise<Response> {
     c.env.CONFIG_KV.put(`${SIGNING_KEY_PREFIX}${input.eventId}`, signingKey),
   ]);
 
+  // Update indexes (path_map + event_ids)
+  await rebuildIndexes(c.env.CONFIG_KV, "upsert", input.eventId, config);
+
   // Notify the Durable Object to reload config (best-effort, non-blocking).
   notifyDO(c, input.eventId);
 
@@ -85,11 +150,15 @@ export async function createEvent(c: AdminContext): Promise<Response> {
 
 /** GET /api/events — list all events */
 export async function listEvents(c: AdminContext): Promise<Response> {
-  const list = await c.env.CONFIG_KV.list({ prefix: EVENT_CONFIG_PREFIX });
+  const eventIds = await getEventIdsIndex(c.env.CONFIG_KV);
   const events: EventConfig[] = [];
 
-  for (const key of list.keys) {
-    const raw = await c.env.CONFIG_KV.get(key.name);
+  // Fetch all configs in parallel using KV.get (not KV.list)
+  const results = await Promise.all(
+    eventIds.map((id) => c.env.CONFIG_KV.get(`${EVENT_CONFIG_PREFIX}${id}`)),
+  );
+
+  for (const raw of results) {
     if (raw) {
       try {
         events.push(JSON.parse(raw) as EventConfig);
@@ -137,6 +206,9 @@ export async function updateEvent(c: AdminContext): Promise<Response> {
 
   await c.env.CONFIG_KV.put(`${EVENT_CONFIG_PREFIX}${eventId}`, JSON.stringify(updated));
 
+  // Update indexes (protectedPaths may have changed)
+  await rebuildIndexes(c.env.CONFIG_KV, "upsert", eventId, updated);
+
   // Notify DO to reload config (best-effort)
   notifyDO(c, eventId);
 
@@ -157,6 +229,9 @@ export async function deleteEvent(c: AdminContext): Promise<Response> {
     c.env.CONFIG_KV.delete(`${EVENT_CONFIG_PREFIX}${eventId}`),
     c.env.CONFIG_KV.delete(`${SIGNING_KEY_PREFIX}${eventId}`),
   ]);
+
+  // Update indexes
+  await rebuildIndexes(c.env.CONFIG_KV, "delete", eventId);
 
   console.log(`[Admin] Deleted event: ${eventId}`);
   return c.json({ deleted: true, eventId });
@@ -191,11 +266,15 @@ export async function updateRate(c: AdminContext): Promise<Response> {
 
 /** GET /api/public/queue-status — public endpoint, returns {eventId, enabled} for all events */
 export async function getPublicQueueStatus(c: AdminContext): Promise<Response> {
-  const list = await c.env.CONFIG_KV.list({ prefix: EVENT_CONFIG_PREFIX });
+  const eventIds = await getEventIdsIndex(c.env.CONFIG_KV);
   const statuses: { eventId: string; enabled: boolean }[] = [];
 
-  for (const key of list.keys) {
-    const raw = await c.env.CONFIG_KV.get(key.name);
+  // Fetch all configs in parallel using KV.get (not KV.list)
+  const results = await Promise.all(
+    eventIds.map((id) => c.env.CONFIG_KV.get(`${EVENT_CONFIG_PREFIX}${id}`)),
+  );
+
+  for (const raw of results) {
     if (raw) {
       try {
         const config = JSON.parse(raw) as EventConfig;

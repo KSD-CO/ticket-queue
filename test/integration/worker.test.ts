@@ -36,6 +36,14 @@ async function seedEvent(
 
   await env.CONFIG_KV.put(`event:${config.eventId}`, JSON.stringify(config));
   await env.CONFIG_KV.put(`signing_key:${config.eventId}`, TEST_SIGNING_KEY);
+
+  // Build path index and event IDs index for the gateway
+  const pathMap: Record<string, string> = {};
+  for (const p of config.protectedPaths as string[]) {
+    pathMap[p] = config.eventId as string;
+  }
+  await env.CONFIG_KV.put("_index:path_map", JSON.stringify(pathMap));
+  await env.CONFIG_KV.put("_index:event_ids", JSON.stringify([config.eventId]));
 }
 
 async function makeValidToken(
