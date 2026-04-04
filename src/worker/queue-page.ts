@@ -36,8 +36,8 @@ export async function handleQueuePage(
     if (assetResponse.ok) {
       // Inject event ID and return URL into the HTML
       let html = await assetResponse.text();
-      html = html.replace("{{EVENT_ID}}", eventId);
-      html = html.replace("{{RETURN_URL}}", encodeURIComponent(returnUrl));
+      html = html.replaceAll("{{EVENT_ID}}", eventId);
+      html = html.replaceAll("{{RETURN_URL}}", encodeURIComponent(returnUrl));
       return c.html(html);
     }
   } catch {
