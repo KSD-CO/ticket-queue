@@ -107,6 +107,11 @@ export async function handleGateway(
   const url = new URL(request.url);
   const path = url.pathname;
 
+  // Guard: never redirect queue paths back to the queue (prevent redirect loop)
+  if (path === "/queue" || path.startsWith("/queue/")) {
+    return fetch(request);
+  }
+
   // Step 1: Check for existing token cookie
   const token = getCookie(request, TOKEN_COOKIE_NAME);
   if (token) {
@@ -192,10 +197,14 @@ async function handleWithoutToken(
 }
 
 function redirectToQueue(c: Context, eventId: string): Response {
+  const originalUrl = new URL(c.req.url);
+
+  // Build a clean queue URL — don't carry over query params from the original request
   const queueUrl = new URL(c.req.url);
   queueUrl.pathname = "/queue";
+  queueUrl.search = ""; // wipe all existing params
   queueUrl.searchParams.set("event", eventId);
-  queueUrl.searchParams.set("return_url", c.req.url);
+  queueUrl.searchParams.set("return_url", originalUrl.toString());
   return c.redirect(queueUrl.toString(), 302);
 }
 
