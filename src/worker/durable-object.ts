@@ -53,6 +53,7 @@ import {
   SIGNING_KEY_PREFIX,
   EVENT_CONFIG_PREFIX,
   DEFAULT_MAX_CONCURRENT_RELEASES,
+  TOKEN_GRACE_PERIOD_SECONDS,
 } from "../shared/constants.js";
 import { signToken, type QueueTokenClaims } from "../shared/jwt.js";
 import {
@@ -393,13 +394,62 @@ export class QueueDurableObject extends DurableObject<Env> {
       }
 
       // If visitor already released, check for stored token
-      const released = this.ctx.storage.sql.exec(
-        "SELECT token FROM visitors WHERE visitor_id = ? AND released_at IS NOT NULL",
+      const releasedRows = this.ctx.storage.sql.exec(
+        "SELECT * FROM visitors WHERE visitor_id = ? AND released_at IS NOT NULL",
         existingVisitorId,
-      ).toArray() as { token: string | null }[];
+      ).toArray() as unknown as VisitorRecord[];
 
-      if (released.length > 0 && released[0]?.token) {
-        this.sendToSocket(ws, { type: "released", token: released[0].token });
+      if (releasedRows.length > 0 && releasedRows[0]?.token) {
+        const storedToken = releasedRows[0].token;
+        // Check if the stored token is still valid (not expired past grace period)
+        const now = Math.floor(Date.now() / 1000);
+        let tokenStillValid = false;
+        try {
+          const payloadB64 = storedToken.split(".")[1];
+          if (payloadB64) {
+            const payload = JSON.parse(atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/"))) as QueueTokenClaims;
+            tokenStillValid = now <= payload.exp + TOKEN_GRACE_PERIOD_SECONDS;
+          }
+        } catch {
+          // Can't parse token — treat as expired
+        }
+
+        if (tokenStillValid) {
+          const maxAge = config.tokenTtlSeconds + TOKEN_GRACE_PERIOD_SECONDS;
+          this.sendToSocket(ws, { type: "released", token: storedToken, maxAge });
+          return;
+        }
+
+        // Token expired — re-sign a fresh token for this visitor
+        const eventId = this.getEventId();
+        if (eventId && config) {
+          const secret = await this.loadSigningKey(eventId);
+          if (secret) {
+            const visitor = releasedRows[0]!;
+            const freshClaims: QueueTokenClaims = {
+              sub: visitor.visitor_id,
+              evt: eventId,
+              iat: now,
+              exp: now + config.tokenTtlSeconds,
+              pos: visitor.position,
+            };
+            const freshToken = await signToken(freshClaims, secret);
+
+            // Update stored token in DB
+            this.ctx.storage.sql.exec(
+              "UPDATE visitors SET token = ? WHERE visitor_id = ?",
+              freshToken,
+              existingVisitorId,
+            );
+
+            this.sendToSocket(ws, { type: "released", token: freshToken, maxAge: config.tokenTtlSeconds + TOKEN_GRACE_PERIOD_SECONDS });
+            console.log(`[QueueDO] Re-issued fresh token for previously released visitor ${existingVisitorId}`);
+            return;
+          }
+        }
+
+        // Fallback: can't re-sign, send the old token anyway (best effort)
+        this.sendToSocket(ws, { type: "released", token: storedToken });
         return;
       }
     }
@@ -577,10 +627,11 @@ export class QueueDurableObject extends DurableObject<Env> {
       visitor.visitor_id,
     );
 
-    // Send token via WebSocket
+    // Send token via WebSocket (include maxAge for accurate cookie TTL)
     const ws = this.findSocketForVisitor(visitor.visitor_id);
     if (ws) {
-      this.sendToSocket(ws, { type: "released", token });
+      const maxAge = config.tokenTtlSeconds + TOKEN_GRACE_PERIOD_SECONDS;
+      this.sendToSocket(ws, { type: "released", token, maxAge });
     }
 
     console.log(`[QueueDO] Released visitor ${visitor.visitor_id} (position ${visitor.position}), wait time: ${Math.round((now - visitor.joined_at) / 1000)}s`);

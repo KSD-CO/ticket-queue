@@ -55,6 +55,8 @@ export interface ReleasedMessage {
   type: "released";
   /** Signed JWT token for accessing the protected resource */
   token: string;
+  /** Cookie max-age in seconds (tokenTtlSeconds + grace period) */
+  maxAge?: number;
 }
 
 export interface PongMessage {

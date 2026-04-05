@@ -119,8 +119,9 @@
     elProgress.style.width = "100%";
     setStatus("You're in!", "connected");
 
-    // Set token cookie (1 hour)
-    setCookie(COOKIE_NAME, msg.token, 3600);
+    // Set token cookie (use server-provided maxAge, fallback to 35 minutes)
+    var cookieMaxAge = msg.maxAge || 2100;
+    setCookie(COOKIE_NAME, msg.token, cookieMaxAge);
 
     // Redirect after brief delay so user sees the success state
     setTimeout(function () {

@@ -192,8 +192,10 @@ function getInlineQueuePage(eventId: string, returnUrl: string): string {
     let reconnectAttempts = 0;
     let initialPosition = null;
     let heartbeatTimer = null;
+    let released = false;
 
     function connect() {
+      if (released) return;
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
       const proto = location.protocol === "https:" ? "wss:" : "ws:";
       const url = proto + "//" + location.host + "/queue/ws?event=" + EVENT_ID;
@@ -232,13 +234,15 @@ function getInlineQueuePage(eventId: string, returnUrl: string): string {
             break;
 
           case "released":
-            document.getElementById("position").textContent = "✓";
+            released = true;
+            document.getElementById("position").textContent = "\u2713";
             document.getElementById("position").classList.add("released");
             document.getElementById("ahead-label").textContent = "";
             document.getElementById("eta").textContent = "Redirecting...";
             document.getElementById("status").textContent = "You're in!";
-            // Set token cookie
-            document.cookie = COOKIE_NAME + "=" + msg.token + ";path=/;secure;samesite=lax;max-age=3600";
+            // Set token cookie (use server-provided maxAge, fallback to 35 minutes)
+            var cookieMaxAge = msg.maxAge || 2100;
+            document.cookie = COOKIE_NAME + "=" + msg.token + ";path=/;secure;samesite=lax;max-age=" + cookieMaxAge;
             // Redirect to protected page
             setTimeout(function() { location.href = RETURN_URL; }, 500);
             break;
@@ -271,6 +275,7 @@ function getInlineQueuePage(eventId: string, returnUrl: string): string {
       };
 
       ws.onclose = function() {
+        if (released) return;
         document.getElementById("status").textContent = "Reconnecting...";
         reconnectAttempts++;
         var delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
