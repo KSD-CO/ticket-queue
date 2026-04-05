@@ -181,6 +181,62 @@ Includes a **full Next.js demo site** — a fictional Vietnamese music event tic
             └──────┬───────┘    │   not_started│   ended    │
                    │            │       │   active    │  ┌──▼──────────┐
             ┌──────▼───────┐    │    ┌──▼──┐   │   ┌──▼──┐│ Passthrough │
+            │ verifyToken()│    │    │ 403 │   │   │proxy ││ + edge cache│
+            │ (all keys)   │    │    │     │   │   │edge  │└─────────────┘
+            └──┬───┬───┬───┘    │    └─────┘   │   │cache │
+               │   │   │        │              │   └──────┘
+            valid  │ expired    │              │
+            +evt   │ (past      │    ┌─────────▼──────────┐
+            match  │  grace)    │    │  mode=threshold?   │
+               │   │   │        │    └───┬───────────┬────┘
+    ┌──────────▼┐  │  ┌▼──────────┐     │           │
+    │ Proxy to  │  │  │ 302 →     │   YES           NO
+    │ origin    │  │  │ /queue    │     │           │
+    │ (edge     │  │  └───────────┘     │     ┌─────▼────────┐
+    │  cached)  │  │                ┌───▼──────────┐│ 302 Redirect │
+    │ + refresh │  │                │count < thresh││ /queue?event │
+    │  cookie   │  │                │ (KV lookup)  ││ =X&return_   │
+    └───────────┘  │                └──┬────────┬──┘│ url=...      │
+                   │                   │        │   └──────────────┘
+         ┌─────────▼─────────┐       YES        NO
+         │ Key missing or    │        │          │
+         │ KV/DO error       │   ┌────▼─────┐ ┌─▼────────────┐
+         └─────────┬─────────┘   │ Proxy to │ │ 302 → /queue │
+                   │             │ origin   │ └──────────────┘
+           ┌───────▼────────┐   │ (bypass  │
+           │  failMode?     │   │  queue)  │
+           ├────────┬───────┤   └──────────┘
+           │ "open" │"closed│
+           │ proxy  │ 503 + │
+           │ origin │Retry- │
+           │        │After  │
+           └────────┴───────┘
+```
+                         ┌──────────────────┐
+                         │  Incoming Request │
+                         │  (any path)       │
+                         └────────┬─────────┘
+                                  │
+                    ┌─────────────▼──────────────┐
+                    │  Has __queue_token cookie?  │
+                    └──────┬──────────────┬──────┘
+                           │              │
+                          YES             NO
+                           │              │
+                ┌──────────▼──────────┐  ┌▼─────────────────────┐
+                │ findEventForPath()  │  │  findEventForPath()  │
+                │ (KV lookup)         │  │  (KV lookup)         │
+                └──────┬────────┬─────┘  └──────┬──────────┬────┘
+                       │        │               │          │
+                    matched   no match       matched    no match
+                       │        │               │          │
+            ┌──────────▼───┐    │    ┌──────────▼───────┐  │
+            │ checkSchedule│    │    │  checkSchedule()  │  │
+            │ + get signing│    │    └──┬──────┬──────┬──┘  │
+            │ key from KV  │    │       │      │      │     │
+            └──────┬───────┘    │   not_started│   ended    │
+                   │            │       │   active    │  ┌──▼──────────┐
+            ┌──────▼───────┐    │    ┌──▼──┐   │   ┌──▼──┐│ Passthrough │
             │ verifyToken()│    │    │ 403 │   │   │proxy││ fetch(req)  │
             │ (all keys)   │    │    │     │   │   │edge ││             │
             └──┬───┬───┬───┘    │    └─────┘   │   │cache│└─────────────┘
@@ -433,6 +489,13 @@ CREATE TABLE _meta (
 │                                   │   { key: "x9y8...", active:     │
 │                                   │     false, createdAt: "..." }]  │
 │                                   │  (JSON array, max 3 keys)       │
+│                                   │                                 │
+│  queue_count:neon-nights-2026     │  "42"                           │
+│                                   │  (active visitor count, 10s TTL │
+│                                   │   written by DO for threshold)  │
+│                                   │                                 │
+│  ratelimit:{window}:{key_prefix}  │  "15"                           │
+│                                   │  (rate limit counter, 120s TTL) │
 └───────────────────────────────────┴─────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -625,7 +688,7 @@ KV read fails in DO
 │   ├── shared/                  # Code shared by both Workers
 │   │   ├── config.ts            # EventConfig type + validation + defaults
 │   │   ├── constants.ts         # Cookie names, KV prefixes, limits
-│   │   ├── errors.ts            # 12 typed error classes
+│   │   ├── errors.ts            # 13 typed error classes
 │   │   ├── jwt.ts               # HMAC-SHA256 JWT sign/verify (Web Crypto)
 │   │   └── messages.ts          # WebSocket message types + parse/serialize
 │   ├── worker/                  # Worker 1: visitor-facing
@@ -636,14 +699,15 @@ KV read fails in DO
 │   └── admin/                   # Worker 2: admin API
 │       ├── index.ts             # REST routes + CORS + error handler
 │       ├── auth.ts              # Bearer token auth (timing-safe comparison)
+│       ├── rate-limit.ts        # KV-based fixed window rate limiting
 │       └── handlers.ts          # CRUD + rate control + key rotation + stats
 ├── public/                      # Static queue page assets
 │   ├── queue.html               # Waiting room template (server-injected config)
 │   ├── queue.js                 # WS client: reconnect, backoff, polling fallback
 │   └── queue.css                # Dark-themed responsive queue UI
 ├── test/
-│   ├── unit/                    # 93 unit tests (jwt, config, errors, messages, signing-keys)
-│   └── integration/             # 67 integration tests (admin API, gateway, E2E)
+│   ├── unit/                    # 102 unit tests (jwt, config, errors, messages, signing-keys)
+│   └── integration/             # 91 integration tests (admin API, gateway, E2E)
 ├── load-test/                   # k6 load test scripts
 │   ├── existing-event.js        # Test against pre-configured event
 │   ├── queue-flow.js            # Full lifecycle (create → test → delete)
@@ -667,6 +731,9 @@ KV read fails in DO
 - **Fail-open** — if the queue system breaks, visitors pass through to the origin (configurable per event: `failMode: "open" | "closed"`)
 - **Edge caching (Cache API)** — origin responses cached at the edge via `caches.default`. First visitor fetches from origin; subsequent visitors served from cache. Configurable TTL per event (`edgeCacheTtl`, `browserCacheTtl`)
 - **Origin stampede protection** — max 50 releases per alarm tick (`DEFAULT_MAX_CONCURRENT_RELEASES`), regardless of `releaseRate` setting
+- **Threshold mode** — `mode: "threshold"` bypasses the queue when traffic is below `activationThreshold`. DO publishes active visitor count to KV every alarm tick (10s TTL); gateway reads it before redirecting. Falls back to always-queue if KV read fails
+- **Cookie max-age sync** — gateway refreshes the `__queue_token` cookie on every proxied request with `Max-Age` matching the JWT's remaining TTL + grace period, so the browser cookie and JWT expiry stay aligned
+- **Admin rate limiting** — KV-based fixed window counter (100 req/60s per API key). Returns 429 with `Retry-After`. Fails open on KV errors
 - **Key rotation** — signing keys stored as JSON array `[{key, active, createdAt}]`, max 3 keys retained. Gateway verifies against all keys; DO signs with the active key. Auto-migration from legacy plain string format
 - **Schedule enforcement** — `eventStartTime`/`eventEndTime` enforced at gateway (403 for not started, passthrough for ended) and DO (rejects joins outside window, stops releasing after end)
 - **Turnstile integration** — optional Cloudflare Turnstile verification on join. Fails open on API errors (allows visitor, logs warning)
@@ -676,6 +743,7 @@ KV read fails in DO
 - **Zero runtime deps** — only `hono` (14KB). Everything else is native (Web Crypto, crypto.randomUUID())
 - **Fair FIFO** — first-come, first-served with reconnection support and disconnect grace period
 - **Eventual consistency** — KV reads may be stale; DO always reschedules alarms when config load fails
+- **Single-source queue page** — queue UI served exclusively from `public/queue.html` via ASSETS binding (no inline HTML fallback)
 
 ---
 
@@ -716,7 +784,7 @@ Open [http://localhost:3000](http://localhost:3000) to see the VIBE ticketing si
 ### 4. Run tests
 
 ```bash
-# All 170 tests
+# All 193 tests
 npm test
 
 # Watch mode
@@ -732,7 +800,9 @@ npm run typecheck
 
 All endpoints under `/api/*` require `Authorization: Bearer <ADMIN_API_KEY>`.
 
-Public endpoints (`/health`, `/api/public/*`) require no auth.
+All authenticated endpoints are rate-limited to **100 requests per 60-second window** per API key. Exceeding the limit returns `429 Too Many Requests` with a `Retry-After` header.
+
+Public endpoints (`/health`, `/api/public/*`) require no auth and are not rate-limited.
 
 ### Create event example
 
@@ -761,7 +831,8 @@ curl -X POST http://localhost:8787/api/events \
 | `releaseRate` | number | `60` | Visitors released per minute |
 | `tokenTtlSeconds` | number | `1800` | Token validity (seconds) |
 | `failMode` | `"open"` \| `"closed"` | `"open"` | Behavior when queue system fails (`closed` returns 503 + `Retry-After: 30`) |
-| `mode` | `"always"` \| `"threshold"` | `"always"` | Queue activation mode |
+| `mode` | `"always"` \| `"threshold"` | `"always"` | Queue activation mode. `"threshold"` bypasses queue when traffic < `activationThreshold` |
+| `activationThreshold` | number | `undefined` | Required when `mode: "threshold"`. Queue activates when active visitors >= this value |
 | `maxQueueSize` | number | `0` | Max visitors in queue (0 = up to 50K DO limit) |
 | `turnstileEnabled` | boolean | `false` | Require Cloudflare Turnstile verification on join |
 | `enabled` | boolean | `true` | Whether queue is active |
@@ -802,7 +873,7 @@ docker run -p 3000:3000 -e NEXT_PUBLIC_ADMIN_API_URL=https://your-admin.workers.
 
 The `.github/workflows/deploy.yml` workflow runs on every push to `main`:
 
-1. **Test** — typecheck + run all 170 tests in the Workers runtime
+1. **Test** — typecheck + run all 193 tests in the Workers runtime
 2. **Deploy Workers** — deploy both Cloudflare Workers (`queue-worker` + `queue-admin`)
 3. **Deploy Demo Site** — build & push Docker image, then SSH deploy to server
 
@@ -826,28 +897,28 @@ On pull requests, only the test job runs.
 
 ## Tests
 
-**170 tests** across 8 test files, all running in the Cloudflare Workers runtime via `@cloudflare/vitest-pool-workers`:
+**193 tests** across 8 test files, all running in the Cloudflare Workers runtime via `@cloudflare/vitest-pool-workers`:
 
 ```
- ✓ test/unit/errors.test.ts          (11 tests)
+ ✓ test/unit/errors.test.ts          (12 tests)
  ✓ test/unit/messages.test.ts        (12 tests)
  ✓ test/unit/jwt.test.ts             (11 tests)
- ✓ test/unit/config.test.ts          (60 tests)
+ ✓ test/unit/config.test.ts          (69 tests)
  ✓ test/unit/signing-keys.test.ts    (9 tests)
- ✓ test/integration/worker.test.ts   (31 tests)
- ✓ test/integration/admin.test.ts    (32 tests)
+ ✓ test/integration/worker.test.ts   (37 tests)
+ ✓ test/integration/admin.test.ts    (39 tests)
  ✓ test/integration/e2e-flow.test.ts (4 tests)
 ```
 
 ### What's tested
 
 - **JWT** — sign/verify round-trip, wrong secret, tampered payload, expiry, grace period, missing claims
-- **Config validation** — required fields, HTTPS enforcement, invalid values, ISO 8601 date validation, edge cache TTL validation, `validateCreateEvent` + `validateUpdateEvent`
-- **Error classes** — all 12 classes: status codes, JSON serialization, instanceof chains
+- **Config validation** — required fields, HTTPS enforcement, invalid values, ISO 8601 date validation, edge cache TTL validation, threshold mode validation (`activationThreshold` required/positive), `validateCreateEvent` + `validateUpdateEvent`
+- **Error classes** — all 13 classes: status codes, JSON serialization, instanceof chains, `RateLimitError` with `retryAfter`
 - **Messages** — parse/serialize for all client + server message types, poll token field
 - **Signing keys** — `parseSigningKeys` (legacy string + JSON array), `getActiveSigningKey`
-- **Gateway** — protected/unprotected paths, valid/expired/tampered tokens, wildcard matching, disabled events, fail-open/closed, schedule enforcement, key rotation, edge caching headers
-- **Admin API** — full CRUD, auth middleware, duplicate rejection, rate adjustment, stats, key rotation (caps at 3), update validation
+- **Gateway** — protected/unprotected paths, valid/expired/tampered tokens, wildcard matching, disabled events, fail-open/closed, schedule enforcement, key rotation, edge caching headers, threshold mode bypass (below/above threshold, missing count), cookie max-age sync (`Set-Cookie` injection)
+- **Admin API** — full CRUD, auth middleware, duplicate rejection, rate adjustment, stats, key rotation (caps at 3), update validation, threshold mode validation, rate limiting (429 when exceeded, window reset)
 - **E2E** — create event → verify KV + signing key, full lifecycle, JWT round-trip, multi-event isolation
 
 ---
@@ -868,6 +939,10 @@ On pull requests, only the test job runs.
 | `DEFAULT_EDGE_CACHE_TTL` | `60` (1 min) | Edge cache for proxied responses |
 | `DEFAULT_BROWSER_CACHE_TTL` | `0` | Browser cache (0 = revalidate with edge) |
 | `DEFAULT_MAX_CONCURRENT_RELEASES` | `50` | Max releases per alarm tick (stampede protection) |
+| `QUEUE_COUNT_PREFIX` | `queue_count:` | KV key prefix for threshold mode visitor counts |
+| `QUEUE_COUNT_TTL_SECONDS` | `10` | Auto-expire threshold count if DO stops writing |
+| `ADMIN_RATE_LIMIT_MAX` | `100` | Admin API: max requests per window |
+| `ADMIN_RATE_LIMIT_WINDOW_SECONDS` | `60` | Admin API: rate limit window duration |
 
 ---
 
@@ -935,14 +1010,11 @@ k6 run load-test/gateway-throughput.js \
 
 | Priority | Feature | Effort |
 |---|---|---|
-| P1 | **Threshold Mode** — only activate queue when concurrent visitors exceed a configurable threshold | M |
 | P1 | **Pre-queue Randomization** — randomize positions at sale start for scheduled onsales | M |
-| P2 | **Broadcast O(N) Fix** — `broadcastPositionUpdates` currently does O(N) SQL queries per alarm tick; batch into single query | M |
-| P2 | **Cookie max-age sync** — sync cookie `max-age` with `tokenTtlSeconds` config | S |
-| P2 | **Admin Rate Limiting** — rate limit admin API endpoints | S |
 | P2 | **One-Order-Per-Customer** — identity verification to prevent scalping | L |
 | P2 | **Queue Sharding** — for >50K concurrent visitors per event | XL |
-| P3 | **Inline Queue Page Drift** — inline fallback HTML may drift from `queue.html` template | S |
+| P2 | **Admin Dashboard UI** — web-based dashboard for event management | L |
+| P3 | **Distributed Load Testing** — run k6 from Grafana Cloud to eliminate client-side TLS bottleneck | S |
 
 ---
 
