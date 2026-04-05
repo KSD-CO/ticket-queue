@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   AdminApi,
+  AdminApiError,
   type EventConfig,
   type QueueStats,
   type CreateEventInput,
@@ -345,6 +346,7 @@ function EventForm({
     originUrl: event?.originUrl ?? "",
     releaseRate: event?.releaseRate ?? 60,
     mode: event?.mode ?? "always",
+    activationThreshold: event?.activationThreshold ?? 100,
     tokenTtlSeconds: event?.tokenTtlSeconds ?? 1800,
     failMode: event?.failMode ?? "open",
     maxQueueSize: event?.maxQueueSize ?? 0,
@@ -369,9 +371,11 @@ function EventForm({
         releaseRate: Number(form.releaseRate),
         tokenTtlSeconds: Number(form.tokenTtlSeconds),
         maxQueueSize: Number(form.maxQueueSize),
+        activationThreshold: form.mode === "threshold" ? Number(form.activationThreshold) : undefined,
       };
       if (!input.eventStartTime) delete input.eventStartTime;
       if (!input.eventEndTime) delete input.eventEndTime;
+      if (input.activationThreshold === undefined) delete input.activationThreshold;
       if (isEdit) delete input.eventId;
       await onSubmit(input);
     } catch (e) {
@@ -498,6 +502,20 @@ function EventForm({
             </Field>
           </div>
 
+          {form.mode === "threshold" && (
+            <Field label="Activation Threshold" hint="Queue activates when visitors >= this number">
+              <input
+                type="number"
+                value={form.activationThreshold}
+                onChange={(e) => set("activationThreshold", e.target.value)}
+                min={1}
+                required
+                className="input"
+                placeholder="100"
+              />
+            </Field>
+          )}
+
           <Field label="Token TTL" hint="Seconds (min 60)">
             <input
               type="number"
@@ -587,7 +605,11 @@ function QueueMonitor({
       setStats(data);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch stats");
+      if (e instanceof AdminApiError && e.statusCode === 429) {
+        setError(`Rate limited. Retry in ${e.retryAfter ?? 60}s...`);
+      } else {
+        setError(e instanceof Error ? e.message : "Failed to fetch stats");
+      }
     }
   }, [api, event.eventId]);
 
@@ -604,8 +626,13 @@ function QueueMonitor({
     try {
       await api.updateRate(event.eventId, newRate);
       setRate(newRate);
+      setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update rate");
+      if (e instanceof AdminApiError && e.statusCode === 429) {
+        setError(`Rate limited. Retry in ${e.retryAfter ?? 60}s...`);
+      } else {
+        setError(e instanceof Error ? e.message : "Failed to update rate");
+      }
     } finally {
       setUpdating(false);
     }
@@ -733,6 +760,9 @@ function QueueMonitor({
           <ConfigRow label="Event ID" value={event.eventId} />
           <ConfigRow label="Status" value={event.enabled ? "Active" : "Disabled"} />
           <ConfigRow label="Mode" value={event.mode} />
+          {event.mode === "threshold" && event.activationThreshold && (
+            <ConfigRow label="Threshold" value={String(event.activationThreshold)} />
+          )}
           <ConfigRow label="Fail Mode" value={event.failMode} />
           <ConfigRow label="Token TTL" value={`${event.tokenTtlSeconds}s`} />
           <ConfigRow label="Max Queue" value={event.maxQueueSize === 0 ? "Unlimited" : String(event.maxQueueSize)} />

@@ -51,12 +51,16 @@ export type UpdateEventInput = Partial<Omit<CreateEventInput, "eventId">> & {
   enabled?: boolean;
 };
 
-class AdminApiError extends Error {
+export class AdminApiError extends Error {
+  public retryAfter?: number;
+
   constructor(
     public statusCode: number,
     message: string,
+    retryAfter?: number,
   ) {
     super(message);
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -78,9 +82,13 @@ export class AdminApi {
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({ message: res.statusText }));
+      const retryAfter = res.status === 429
+        ? parseInt(res.headers.get("Retry-After") ?? "", 10) || undefined
+        : undefined;
       throw new AdminApiError(
         res.status,
         (body as { message?: string }).message ?? res.statusText,
+        retryAfter,
       );
     }
 

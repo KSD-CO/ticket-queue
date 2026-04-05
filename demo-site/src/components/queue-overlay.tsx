@@ -56,7 +56,9 @@ export function QueueOverlay({ eventId, queueUrl, returnUrl, onRelease }: QueueO
             break;
           case "released":
             setState({ status: "released", token: msg.token });
-            document.cookie = `__queue_token=${msg.token};path=/;max-age=3600;samesite=lax`;
+            // Use server-provided maxAge (seconds), fallback to 35 minutes
+            const cookieMaxAge = msg.maxAge || 2100;
+            document.cookie = `__queue_token=${msg.token};path=/;max-age=${cookieMaxAge};samesite=lax`;
             onRelease(msg.token);
             break;
           case "paused":
