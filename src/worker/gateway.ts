@@ -16,9 +16,10 @@
 //         └── NO ──▶ pass through (not protected)
 //
 // Edge caching (origin protection):
-//   proxyToOrigin uses Cloudflare's cf.cacheTtl + cf.cacheEverything
-//   so the first visitor's origin fetch is cached at the edge.
-//   Subsequent visitors for the same URL hit the edge, not origin.
+//   Two caching strategies:
+//   1. proxyToOrigin — Cache API for protected paths (token-verified visitors).
+//   2. passthroughWithCache — Cache API for non-protected paths (homepage, etc).
+//   Both use caches.default to store/retrieve at the edge.
 //   Config: edgeCacheTtl (default 60s), browserCacheTtl (default 0s).
 //
 // Fail mode:
@@ -154,11 +155,11 @@ function handleFailure(
       headers: { "Retry-After": "30" },
     });
   }
-  // fail-open
+  // fail-open — proxy with edge cache
   if (originUrl) {
     return proxyToOrigin(request, originUrl);
   }
-  return fetch(request);
+  return passthroughWithCache(request);
 }
 
 /**
@@ -208,6 +209,66 @@ async function verifyTokenWithKeys(
   throw lastError;
 }
 
+/**
+ * Passthrough a request with Cache API edge caching.
+ * For GET/HEAD requests, checks the cache first and stores the response.
+ * For mutations (POST/PUT/DELETE), passes through without caching.
+ *
+ * This protects the origin even for non-protected paths (homepage, event pages,
+ * static assets, images, etc.) that don't go through the queue flow.
+ */
+async function passthroughWithCache(
+  request: Request,
+  edgeCacheTtl?: number,
+): Promise<Response> {
+  const isGetOrHead = request.method === "GET" || request.method === "HEAD";
+  const effectiveEdgeTtl = edgeCacheTtl ?? DEFAULT_EDGE_CACHE_TTL;
+
+  if (!isGetOrHead || effectiveEdgeTtl <= 0) {
+    return fetch(request);
+  }
+
+  const cache = caches.default;
+  const cacheKey = new Request(request.url, { method: request.method });
+
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const headers = new Headers(cached.headers);
+    headers.set("X-Cache-Status", "HIT");
+    return new Response(cached.body, {
+      status: cached.status,
+      statusText: cached.statusText,
+      headers,
+    });
+  }
+
+  const response = await fetch(request);
+  if (!response.ok) {
+    return response;
+  }
+
+  const cacheHeaders = new Headers(response.headers);
+  cacheHeaders.set("X-Cache-Status", "MISS");
+  // Cache API uses Cache-Control max-age to determine storage TTL
+  cacheHeaders.set("Cache-Control", `public, max-age=${effectiveEdgeTtl}`);
+
+  const responseToCache = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: cacheHeaders,
+  });
+
+  const responseForClient = responseToCache.clone();
+  // Await cache.put to ensure it completes before the Worker exits.
+  // Without await (or waitUntil), Cloudflare may cancel the background write.
+  try {
+    await cache.put(cacheKey, responseToCache);
+  } catch (e) {
+    console.error("[Gateway] cache.put failed (passthrough):", e);
+  }
+  return responseForClient;
+}
+
 /** Main gateway handler */
 export async function handleGateway(
   c: Context<{ Bindings: GatewayEnv }>,
@@ -217,6 +278,7 @@ export async function handleGateway(
   const path = url.pathname;
 
   // Guard: never redirect queue paths back to the queue (prevent redirect loop)
+  // Queue paths are dynamic (HTML injection, WS upgrade, polling) — no caching.
   if (path === "/queue" || path.startsWith("/queue/")) {
     return fetch(request);
   }
@@ -244,12 +306,12 @@ async function handleWithToken(
   } catch (e) {
     // KV error — handle based on failMode (unknown here, default open)
     console.error("[Gateway] KV error looking up config, failing open:", e);
-    return fetch(request);
+    return passthroughWithCache(request);
   }
 
   if (!config) {
     // Path not protected, pass through even though token exists
-    return fetch(request);
+    return passthroughWithCache(request);
   }
 
   // Check schedule — event may have ended
@@ -302,12 +364,12 @@ async function handleWithoutToken(
   } catch (e) {
     // KV or DO error — handle per failMode (unknown, default open)
     console.error("[Gateway] Error checking event config:", e);
-    return fetch(request);
+    return passthroughWithCache(request);
   }
 
   if (!config) {
-    // Not a protected path — pass through
-    return fetch(request);
+    // Not a protected path — pass through with edge cache
+    return passthroughWithCache(request);
   }
 
   // Check schedule
@@ -393,6 +455,8 @@ async function proxyToOrigin(
       // Edge cache HIT — return immediately without hitting origin
       const headers = new Headers(cached.headers);
       headers.set("X-Cache-Status", "HIT");
+      // Override Cache-Control for the browser (edge TTL was used for storage only)
+      setBrowserCacheHeaders(headers, effectiveBrowserTtl);
       return new Response(cached.body, {
         status: cached.status,
         statusText: cached.statusText,
@@ -409,11 +473,10 @@ async function proxyToOrigin(
 
     // Build the cacheable response with proper headers
     const cacheHeaders = new Headers(originResponse.headers);
-    setBrowserCacheHeaders(cacheHeaders, effectiveBrowserTtl);
     cacheHeaders.set("X-Cache-Status", "MISS");
-    // Cache-Control for the Cache API entry (edge TTL)
-    // This tells the Cache API when to expire this entry.
-    cacheHeaders.set("CDN-Cache-Control", `public, max-age=${effectiveEdgeTtl}`);
+    // Cache API uses Cache-Control max-age to determine how long to store.
+    // We set edgeTtl here so the entry expires correctly in the cache.
+    cacheHeaders.set("Cache-Control", `public, max-age=${effectiveEdgeTtl}`);
 
     const responseToCache = new Response(originResponse.body, {
       status: originResponse.status,
@@ -421,13 +484,23 @@ async function proxyToOrigin(
       headers: cacheHeaders,
     });
 
-    // Store in cache (non-blocking — don't wait for cache write)
-    // We must clone because the response body can only be read once.
+    // Clone for the client BEFORE cache.put consumes the body
     const responseForClient = responseToCache.clone();
-    // cache.put is fire-and-forget; errors are silently ignored
-    cache.put(cacheKey, responseToCache).catch(() => {});
+    // Await cache.put to ensure it completes before the Worker exits.
+    try {
+      await cache.put(cacheKey, responseToCache);
+    } catch (e) {
+      console.error("[Gateway] cache.put failed (proxy):", e);
+    }
 
-    return responseForClient;
+    // Override Cache-Control for the browser on the client response
+    const clientHeaders = new Headers(responseForClient.headers);
+    setBrowserCacheHeaders(clientHeaders, effectiveBrowserTtl);
+    return new Response(responseForClient.body, {
+      status: responseForClient.status,
+      statusText: responseForClient.statusText,
+      headers: clientHeaders,
+    });
   }
 
   // ── Non-cacheable request (POST/PUT/DELETE or edgeTtl=0) ──
