@@ -9,6 +9,7 @@ import {
   QueueCapacityError,
   ValidationError,
   UnauthorizedError,
+  RateLimitError,
 } from "../../src/shared/errors.js";
 
 describe("Error classes", () => {
@@ -84,6 +85,18 @@ describe("Error classes", () => {
     expect(err.message).toBe("Unauthorized");
   });
 
+  test("RateLimitError is 429 with retryAfter", () => {
+    const err = new RateLimitError(30);
+    expect(err.statusCode).toBe(429);
+    expect(err.retryAfter).toBe(30);
+    expect(err.code).toBe("RATE_LIMIT_EXCEEDED");
+    expect(err.name).toBe("RateLimitError");
+    expect(err).toBeInstanceOf(QueueError);
+    const json = err.toJSON();
+    expect(json.retryAfter).toBe(30);
+    expect(json.statusCode).toBe(429);
+  });
+
   test("all error classes are instanceof Error", () => {
     const errors = [
       new TokenParseError("x"),
@@ -94,6 +107,7 @@ describe("Error classes", () => {
       new QueueCapacityError(0, 0),
       new ValidationError("x"),
       new UnauthorizedError(),
+      new RateLimitError(60),
     ];
     for (const err of errors) {
       expect(err).toBeInstanceOf(Error);

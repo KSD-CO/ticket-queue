@@ -592,5 +592,105 @@ describe("Admin API Integration", () => {
       expect(body.eventStartTime).toBe("2025-06-01T10:00:00Z");
       expect(body.eventEndTime).toBe("2025-06-01T23:00:00Z");
     });
+
+    test("rejects threshold mode without activationThreshold", async () => {
+      const res = await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(
+          makeEventInput({ mode: "threshold" }),
+        ),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { fields: Record<string, string> };
+      expect(body.fields.activationThreshold).toContain("required");
+    });
+
+    test("accepts threshold mode with valid activationThreshold", async () => {
+      const res = await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(
+          makeEventInput({ mode: "threshold", activationThreshold: 50 }),
+        ),
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { mode: string; activationThreshold: number };
+      expect(body.mode).toBe("threshold");
+      expect(body.activationThreshold).toBe(50);
+    });
+
+    test("rejects activationThreshold less than 1", async () => {
+      const res = await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(
+          makeEventInput({ mode: "threshold", activationThreshold: 0 }),
+        ),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { fields: Record<string, string> };
+      expect(body.fields.activationThreshold).toContain("positive");
+    });
+
+    test("rejects negative activationThreshold in update", async () => {
+      const input = makeEventInput();
+      await adminFetch("/api/events", {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(input),
+      });
+
+      const res = await adminFetch(`/api/events/${input.eventId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ activationThreshold: -5 }),
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ── Rate limiting ──
+
+  describe("Rate limiting", () => {
+    test("allows requests within rate limit", async () => {
+      // A single request should be well within the limit
+      const res = await adminFetch("/api/events", {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    test("returns 429 when rate limit is exceeded", async () => {
+      // Manually seed the rate limit counter to be at the limit
+      const window = Math.floor(Date.now() / 1000 / 60); // 60-second window
+      const keyPrefix = API_KEY.slice(0, 8);
+      const kvKey = `ratelimit:${window}:${keyPrefix}`;
+      // Set count to 100 (the limit)
+      await env.CONFIG_KV.put(kvKey, "100");
+
+      const res = await adminFetch("/api/events", {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(429);
+      const body = (await res.json()) as { error: string; retryAfter: number };
+      expect(body.error).toBe("RATE_LIMIT_EXCEEDED");
+      expect(body.retryAfter).toBeGreaterThan(0);
+      expect(res.headers.get("Retry-After")).toBeDefined();
+    });
+
+    test("rate limit resets in new window", async () => {
+      // Set a counter for a past window (should not affect current requests)
+      const pastWindow = Math.floor(Date.now() / 1000 / 60) - 1;
+      const keyPrefix = API_KEY.slice(0, 8);
+      const pastKey = `ratelimit:${pastWindow}:${keyPrefix}`;
+      await env.CONFIG_KV.put(pastKey, "999");
+
+      // Current window has no counter → should be allowed
+      const res = await adminFetch("/api/events", {
+        headers: authHeaders(),
+      });
+      expect(res.status).toBe(200);
+    });
   });
 });

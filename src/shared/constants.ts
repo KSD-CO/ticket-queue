@@ -63,3 +63,18 @@ export const QUEUE_PAGE_CACHE_TTL = 0; // no browser cache — HTML is dynamic p
 
 /** Maximum concurrent releases per alarm tick (origin stampede protection) */
 export const DEFAULT_MAX_CONCURRENT_RELEASES = 50;
+
+/** KV key prefix for queue visitor count (written by DO, read by gateway for threshold mode) */
+export const QUEUE_COUNT_PREFIX = "queue_count:";
+
+/** TTL in seconds for the queue count KV entry (auto-expires if DO stops writing) */
+export const QUEUE_COUNT_TTL_SECONDS = 10;
+
+/** Default activation threshold for threshold mode (visitors in queue) */
+export const DEFAULT_ACTIVATION_THRESHOLD = 100;
+
+/** Admin API rate limit: max requests per window */
+export const ADMIN_RATE_LIMIT_MAX = 100;
+
+/** Admin API rate limit: window duration in seconds */
+export const ADMIN_RATE_LIMIT_WINDOW_SECONDS = 60;

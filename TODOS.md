@@ -1,53 +1,50 @@
 # TODOS — Deferred Work Items
 
-Items identified during the mega plan review that were intentionally deferred.
-Sorted by priority.
+Items identified during the mega plan review. Sorted by priority.
+Completed items are marked with ~~strikethrough~~.
 
 ---
 
-## P1: Threshold Mode Design Doc
+## ~~P1: Threshold Mode~~ ✓ DONE
 
-**Status:** Needs architecture decision
-**Context:** `mode: "threshold"` and `activationThreshold` exist in `EventConfig` but have zero runtime enforcement. The gateway always queues visitors regardless of traffic level.
-
-**Open questions:**
-- Where does traffic counting happen? (DO per-event? A separate DO? Workers Analytics?)
-- What's the counting window? (rolling 1 min? 5 min? exponential moving average?)
-- How does the gateway learn the current traffic rate without adding latency?
-- Should threshold mode be per-path or per-event?
-
-**Next step:** Write a design doc with options and tradeoffs before implementing.
+**Status:** Implemented
+**Implementation:**
+- DO alarm writes active visitor count to KV key `queue_count:{eventId}` every tick (10s TTL, auto-expires if DO stops running)
+- Gateway reads this KV key when `mode === "threshold"`. If count < `activationThreshold`, bypasses queue and proxies to origin directly
+- Config validation: `activationThreshold` required when `mode === "threshold"`, must be >= 1
+- Fails open: if KV read fails or key is missing, count defaults to 0 → traffic below threshold → skip queue
 
 ---
 
-## P2: `broadcastPositionUpdates` O(N²) Fix
+## ~~P2: `broadcastPositionUpdates` O(N) Fix~~ ✓ DONE
 
-**File:** `src/worker/durable-object.ts:758-779`
-**Issue:** Every alarm tick, `broadcastPositionUpdates()` iterates all WebSockets and runs a SQL query per socket. At 50K visitors this is ~50K queries/second.
-
-**Options:**
-1. Batch query: `SELECT visitor_id, position FROM visitors WHERE released_at IS NULL` once, build a map, then iterate sockets.
-2. Incremental updates: Only broadcast to visitors whose relative position changed since last tick.
-3. Sampling: Broadcast every N ticks instead of every tick (positions change slowly).
+**Status:** Implemented
+**Before:** O(N) — one `SELECT position FROM visitors WHERE visitor_id = ?` per WebSocket per alarm tick. At 50K visitors = 50K queries/second.
+**After:** O(1) — single `SELECT visitor_id, position FROM visitors WHERE released_at IS NULL ORDER BY position ASC`, build map, iterate sockets from map. Relative positions are computed from the sorted array index (no per-socket SQL).
 
 ---
 
-## P2: Cookie `max-age` ↔ `tokenTtlSeconds` Sync
+## ~~P2: Cookie `max-age` ↔ `tokenTtlSeconds` Sync~~ ✓ DONE
 
-**Issue:** The gateway proxies to origin but doesn't set or refresh the `__queue_token` cookie. The token TTL is baked into the JWT claims, but there's no `Set-Cookie` header with a matching `max-age`. Browsers will hold the cookie indefinitely (session cookie) even after the JWT expires.
-
-**Fix:** When proxying a valid token to origin, inject a `Set-Cookie` header with `max-age` matching the remaining TTL of the JWT.
+**Status:** Implemented
+**Implementation:** `injectTokenCookieRefresh()` in `gateway.ts` — after verifying a valid token and proxying to origin, injects a `Set-Cookie` header:
+```
+Set-Cookie: __queue_token={jwt}; Path=/; Max-Age={remaining_ttl}; HttpOnly; Secure; SameSite=Lax
+```
+`Max-Age` = `claims.exp - now + TOKEN_GRACE_PERIOD_SECONDS`, so the cookie expires when the JWT does.
 
 ---
 
-## P2: Admin API Rate Limiting
+## ~~P2: Admin API Rate Limiting~~ ✓ DONE
 
-**Issue:** The admin API is protected by API key but has no rate limiting. A compromised key could hammer KV with writes.
-
-**Options:**
-- Cloudflare rate limiting rules (WAF level, no code change)
-- Per-IP rate limiting in Hono middleware using `cf` request properties
-- KV-based sliding window counter
+**Status:** Implemented
+**Implementation:** KV-based fixed window counter in `src/admin/rate-limit.ts`:
+- 100 requests per 60-second window per API key (configurable via constants)
+- Key format: `ratelimit:{window}:{key_prefix}` (first 8 chars of API key)
+- Returns 429 with `Retry-After` header when limit exceeded
+- KV entries auto-expire after 2x window duration
+- Fails open: if KV read/write fails, allows the request through
+- New error class: `RateLimitError` (429, `RATE_LIMIT_EXCEEDED`)
 
 ---
 

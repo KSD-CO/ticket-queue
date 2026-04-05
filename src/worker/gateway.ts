@@ -28,7 +28,7 @@
 // ============================================================
 
 import type { Context } from "hono";
-import { verifyToken } from "../shared/jwt.js";
+import { verifyToken, type QueueTokenClaims } from "../shared/jwt.js";
 import {
   TOKEN_COOKIE_NAME,
   TOKEN_GRACE_PERIOD_SECONDS,
@@ -37,6 +37,7 @@ import {
   PATH_INDEX_KEY,
   DEFAULT_EDGE_CACHE_TTL,
   DEFAULT_BROWSER_CACHE_TTL,
+  QUEUE_COUNT_PREFIX,
 } from "../shared/constants.js";
 import { TokenExpiredError, TokenSignatureError } from "../shared/errors.js";
 import type { EventConfig, FailMode } from "../shared/config.js";
@@ -269,6 +270,34 @@ async function passthroughWithCache(
   return responseForClient;
 }
 
+/**
+ * Check if threshold mode should bypass the queue.
+ * Returns true if the queue should be skipped (traffic below threshold).
+ * Returns false if the queue should be active (traffic at or above threshold).
+ *
+ * Reads the active visitor count from KV (published by the DO alarm).
+ * If the KV key is missing (DO not running / never written), treats count as 0
+ * which means traffic is below threshold → skip queue.
+ */
+async function shouldBypassThreshold(
+  config: EventConfig,
+  kv: KVNamespace,
+): Promise<boolean> {
+  if (config.mode !== "threshold") return false;
+
+  const threshold = config.activationThreshold ?? 0;
+  if (threshold <= 0) return false; // No valid threshold → always queue
+
+  try {
+    const raw = await kv.get(`${QUEUE_COUNT_PREFIX}${config.eventId}`);
+    const count = raw ? parseInt(raw, 10) : 0;
+    return isNaN(count) || count < threshold;
+  } catch {
+    // KV error → fail open, skip queue
+    return true;
+  }
+}
+
 /** Main gateway handler */
 export async function handleGateway(
   c: Context<{ Bindings: GatewayEnv }>,
@@ -340,8 +369,9 @@ async function handleWithToken(
       return redirectToQueue(c, config.eventId);
     }
 
-    // Valid token — proxy to origin
-    return proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
+    // Valid token — proxy to origin and refresh the cookie max-age
+    const proxyResponse = await proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
+    return injectTokenCookieRefresh(proxyResponse, token, claims);
   } catch (e) {
     if (e instanceof TokenExpiredError) {
       // Past grace period — need to re-queue
@@ -386,7 +416,13 @@ async function handleWithoutToken(
     return proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
   }
 
-  // Protected path, active event, no token — redirect to queue
+  // Protected path, active event, no token — check threshold mode
+  if (await shouldBypassThreshold(config, c.env.CONFIG_KV)) {
+    // Traffic below threshold — let visitors through without queueing
+    return proxyToOrigin(request, config.originUrl, config.edgeCacheTtl, config.browserCacheTtl);
+  }
+
+  // Queue is active — redirect to queue
   return redirectToQueue(c, config.eventId);
 }
 
@@ -550,4 +586,31 @@ function setBrowserCacheHeaders(headers: Headers, browserCacheTtl: number): void
     // No browser cache — force revalidation with edge on every request
     headers.set("Cache-Control", "public, max-age=0, must-revalidate");
   }
+}
+
+/**
+ * Inject a Set-Cookie header to refresh the queue token cookie's max-age.
+ * This keeps the cookie lifetime in sync with the JWT's remaining TTL,
+ * so the browser doesn't hold a session cookie indefinitely after the JWT expires.
+ */
+function injectTokenCookieRefresh(
+  response: Response,
+  token: string,
+  claims: QueueTokenClaims,
+): Response {
+  const now = Math.floor(Date.now() / 1000);
+  const remainingTtl = claims.exp - now + TOKEN_GRACE_PERIOD_SECONDS;
+  if (remainingTtl <= 0) return response; // Already expired, don't set cookie
+
+  const headers = new Headers(response.headers);
+  headers.append(
+    "Set-Cookie",
+    `${TOKEN_COOKIE_NAME}=${token}; Path=/; Max-Age=${remainingTtl}; HttpOnly; Secure; SameSite=Lax`,
+  );
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }

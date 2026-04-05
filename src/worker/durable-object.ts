@@ -54,6 +54,8 @@ import {
   EVENT_CONFIG_PREFIX,
   DEFAULT_MAX_CONCURRENT_RELEASES,
   TOKEN_GRACE_PERIOD_SECONDS,
+  QUEUE_COUNT_PREFIX,
+  QUEUE_COUNT_TTL_SECONDS,
 } from "../shared/constants.js";
 import { signToken, type QueueTokenClaims } from "../shared/jwt.js";
 import {
@@ -597,6 +599,21 @@ export class QueueDurableObject extends DurableObject<Env> {
     // Broadcast updated positions to all remaining visitors
     this.broadcastPositionUpdates();
 
+    // Publish active visitor count to KV for gateway threshold mode.
+    // Uses a short TTL so the key auto-expires if the DO stops running.
+    if (config.mode === "threshold") {
+      const count = this.getActiveVisitorCount();
+      try {
+        await this.env.CONFIG_KV.put(
+          `${QUEUE_COUNT_PREFIX}${eventId}`,
+          String(count),
+          { expirationTtl: QUEUE_COUNT_TTL_SECONDS },
+        );
+      } catch (e) {
+        console.error(`[QueueDO] Failed to publish queue count to KV:`, e);
+      }
+    }
+
     // Reschedule if there are still visitors waiting
     if (shouldReschedule) {
       await this.ensureAlarmScheduled();
@@ -814,18 +831,38 @@ export class QueueDurableObject extends DurableObject<Env> {
 
   private broadcastPositionUpdates(): void {
     const sockets = this.ctx.getWebSockets();
+    if (sockets.length === 0) return;
+
+    // Single batch query: fetch all active (non-released) visitors at once.
+    // This replaces the previous O(N) approach of one query per WebSocket.
+    const activeVisitors = this.ctx.storage.sql.exec(
+      "SELECT visitor_id, position FROM visitors WHERE released_at IS NULL ORDER BY position ASC",
+    ).toArray() as { visitor_id: string; position: number }[];
+
+    // Build a map from visitor_id → absolute position
+    const positionMap = new Map<string, number>();
+    for (const v of activeVisitors) {
+      positionMap.set(v.visitor_id, v.position);
+    }
+
+    // Pre-compute relative positions: since activeVisitors is sorted by position ASC,
+    // the relative position (1-based) is simply the index + 1.
+    const relativeMap = new Map<string, { relativePosition: number; totalAhead: number }>();
+    for (let i = 0; i < activeVisitors.length; i++) {
+      const v = activeVisitors[i]!;
+      relativeMap.set(v.visitor_id, {
+        relativePosition: i + 1,
+        totalAhead: i,
+      });
+    }
+
     for (const ws of sockets) {
       const visitorId = this.getVisitorIdFromSocket(ws);
       if (!visitorId) continue;
 
-      const visitor = this.ctx.storage.sql.exec(
-        "SELECT position FROM visitors WHERE visitor_id = ? AND released_at IS NULL",
-        visitorId,
-      ).toArray() as { position: number }[];
+      const pos = relativeMap.get(visitorId);
+      if (!pos) continue; // Already released or not found
 
-      if (visitor.length === 0) continue;
-
-      const pos = this.getQueuePosition(visitor[0]!.position);
       this.sendToSocket(ws, {
         type: "position",
         visitorId,

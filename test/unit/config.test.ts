@@ -203,6 +203,42 @@ describe("EventConfig", () => {
       expect(result.valid).toBe(false);
       if (!result.valid) expect(result.errors.browserCacheTtl).toContain("non-negative");
     });
+
+    // ── Threshold mode validation ──
+
+    test("rejects threshold mode without activationThreshold", () => {
+      const result = validateCreateEvent({ ...validInput, mode: "threshold" });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.errors.activationThreshold).toContain("required");
+    });
+
+    test("accepts threshold mode with valid activationThreshold", () => {
+      const result = validateCreateEvent({ ...validInput, mode: "threshold", activationThreshold: 50 });
+      expect(result.valid).toBe(true);
+    });
+
+    test("rejects activationThreshold of 0", () => {
+      const result = validateCreateEvent({ ...validInput, mode: "threshold", activationThreshold: 0 });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.errors.activationThreshold).toContain("positive");
+    });
+
+    test("rejects negative activationThreshold", () => {
+      const result = validateCreateEvent({ ...validInput, mode: "threshold", activationThreshold: -10 });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.errors.activationThreshold).toContain("positive");
+    });
+
+    test("rejects non-numeric activationThreshold", () => {
+      const result = validateCreateEvent({ ...validInput, mode: "threshold", activationThreshold: "high" });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.errors.activationThreshold).toContain("positive");
+    });
+
+    test("accepts activationThreshold without threshold mode (ignored but validated)", () => {
+      const result = validateCreateEvent({ ...validInput, mode: "always", activationThreshold: 100 });
+      expect(result.valid).toBe(true);
+    });
   });
 
   describe("validateUpdateEvent", () => {
@@ -375,6 +411,25 @@ describe("EventConfig", () => {
 
     test("accepts valid browserCacheTtl in update", () => {
       const result = validateUpdateEvent({ browserCacheTtl: 60 });
+      expect(result.valid).toBe(true);
+    });
+
+    // ── Threshold mode validation in updates ──
+
+    test("rejects negative activationThreshold in update", () => {
+      const result = validateUpdateEvent({ activationThreshold: -5 });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.errors.activationThreshold).toContain("positive");
+    });
+
+    test("rejects zero activationThreshold in update", () => {
+      const result = validateUpdateEvent({ activationThreshold: 0 });
+      expect(result.valid).toBe(false);
+      if (!result.valid) expect(result.errors.activationThreshold).toContain("positive");
+    });
+
+    test("accepts valid activationThreshold in update", () => {
+      const result = validateUpdateEvent({ activationThreshold: 200 });
       expect(result.valid).toBe(true);
     });
   });

@@ -17,7 +17,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { adminAuth } from "./auth.js";
-import { QueueError } from "../shared/errors.js";
+import { adminRateLimit } from "./rate-limit.js";
+import { QueueError, RateLimitError } from "../shared/errors.js";
 import {
   createEvent,
   listEvents,
@@ -50,6 +51,9 @@ app.use("/*", cors({
 // ── Global error handler ──
 
 app.onError((err, c) => {
+  if (err instanceof RateLimitError) {
+    return c.json(err.toJSON(), { status: 429, headers: { "Retry-After": String(err.retryAfter) } });
+  }
   if (err instanceof QueueError) {
     return c.json(err.toJSON(), err.statusCode as any);
   }
@@ -65,9 +69,10 @@ app.get("/health", (c) => c.json({ status: "ok", worker: "queue-admin" }));
 
 app.get("/api/public/queue-status", getPublicQueueStatus);
 
-// ── All API routes require auth ──
+// ── All API routes require auth + rate limiting ──
 
 app.use("/api/*", adminAuth);
+app.use("/api/*", adminRateLimit);
 
 // ── Event CRUD ──
 

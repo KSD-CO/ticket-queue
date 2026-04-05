@@ -18,7 +18,8 @@
 //   ├── VisitorNotFoundError   (reconnect with unknown ID)
 //   ├── OriginError            (upstream 5xx or timeout)
 //   ├── ValidationError        (invalid admin API payload)
-//   └── UnauthorizedError      (missing/bad API key)
+//   ├── UnauthorizedError      (missing/bad API key)
+//   └── RateLimitError         (admin API rate limit exceeded)
 // ============================================================
 
 export class QueueError extends Error {
@@ -139,5 +140,22 @@ export class UnauthorizedError extends QueueError {
   constructor(message = "Unauthorized") {
     super(message, 401, "UNAUTHORIZED");
     this.name = "UnauthorizedError";
+  }
+}
+
+export class RateLimitError extends QueueError {
+  public readonly retryAfter: number;
+
+  constructor(retryAfter: number) {
+    super(`Rate limit exceeded. Try again in ${retryAfter} seconds.`, 429, "RATE_LIMIT_EXCEEDED");
+    this.name = "RateLimitError";
+    this.retryAfter = retryAfter;
+  }
+
+  toJSON() {
+    return {
+      ...super.toJSON(),
+      retryAfter: this.retryAfter,
+    };
   }
 }

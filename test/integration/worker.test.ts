@@ -419,6 +419,127 @@ describe("Queue Worker Integration", () => {
     });
   });
 
+  // ── Threshold mode ──
+
+  describe("Threshold mode", () => {
+    test("threshold mode bypasses queue when count is below threshold", async () => {
+      // Set up event with threshold mode and activationThreshold = 100
+      await seedEvent({
+        mode: "threshold",
+        activationThreshold: 100,
+      });
+      // No queue_count key in KV → count defaults to 0 → below threshold → bypass
+      const res = await SELF.fetch("https://worker.test/tickets/123", {
+        redirect: "manual",
+      });
+      // Should NOT redirect to queue — bypasses because traffic is below threshold
+      expect(res.status).not.toBe(302);
+    });
+
+    test("threshold mode redirects to queue when count is at or above threshold", async () => {
+      await seedEvent({
+        mode: "threshold",
+        activationThreshold: 10,
+      });
+      // Manually set the queue count above threshold
+      await env.CONFIG_KV.put(`queue_count:${TEST_EVENT_ID}`, "15");
+
+      const res = await SELF.fetch("https://worker.test/tickets/123", {
+        redirect: "manual",
+      });
+      // Should redirect to queue — traffic is above threshold
+      expect(res.status).toBe(302);
+      const location = res.headers.get("Location") ?? "";
+      expect(location).toContain("/queue");
+    });
+
+    test("always mode ignores threshold and always redirects to queue", async () => {
+      await seedEvent({
+        mode: "always",
+        activationThreshold: 100,
+      });
+      // Even with queue_count = 0 (below threshold), always mode queues
+      const res = await SELF.fetch("https://worker.test/tickets/123", {
+        redirect: "manual",
+      });
+      expect(res.status).toBe(302);
+    });
+
+    test("threshold mode with missing activationThreshold defaults to always queue", async () => {
+      // Manually seed without activationThreshold (bypassing validation)
+      const config = {
+        eventId: TEST_EVENT_ID,
+        name: "Threshold Test",
+        enabled: true,
+        protectedPaths: ["/tickets/*"],
+        originUrl: TEST_ORIGIN,
+        releaseRate: 60,
+        mode: "threshold",
+        // activationThreshold omitted
+        tokenTtlSeconds: 1800,
+        failMode: "open",
+        turnstileEnabled: false,
+        maxQueueSize: 0,
+        edgeCacheTtl: 60,
+        browserCacheTtl: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await env.CONFIG_KV.put(`event:${TEST_EVENT_ID}`, JSON.stringify(config));
+      await env.CONFIG_KV.put(`signing_key:${TEST_EVENT_ID}`, TEST_SIGNING_KEY);
+      const pathMap: Record<string, string> = { "/tickets/*": TEST_EVENT_ID };
+      await env.CONFIG_KV.put("_index:path_map", JSON.stringify(pathMap));
+      await env.CONFIG_KV.put("_index:event_ids", JSON.stringify([TEST_EVENT_ID]));
+
+      const res = await SELF.fetch("https://worker.test/tickets/123", {
+        redirect: "manual",
+      });
+      // Without activationThreshold, shouldBypassThreshold returns false → always queues
+      expect(res.status).toBe(302);
+    });
+  });
+
+  // ── Cookie max-age sync ──
+
+  describe("Cookie max-age sync", () => {
+    test("valid token proxy response includes Set-Cookie with remaining TTL", async () => {
+      await seedEvent();
+      const token = await makeValidToken();
+
+      const res = await SELF.fetch("https://worker.test/tickets/123", {
+        headers: { Cookie: `__queue_token=${token}` },
+        redirect: "manual",
+      });
+      // Should not redirect
+      expect(res.status).not.toBe(302);
+      // Should have Set-Cookie header with the token
+      const setCookie = res.headers.get("Set-Cookie") ?? "";
+      expect(setCookie).toContain("__queue_token=");
+      expect(setCookie).toContain("Max-Age=");
+      expect(setCookie).toContain("HttpOnly");
+      expect(setCookie).toContain("Secure");
+      expect(setCookie).toContain("SameSite=Lax");
+    });
+
+    test("expired token does not inject Set-Cookie (redirects instead)", async () => {
+      await seedEvent();
+      const now = Math.floor(Date.now() / 1000);
+      const token = await makeValidToken({
+        iat: now - 7200,
+        exp: now - 3600, // expired 1 hour ago
+      });
+      const res = await SELF.fetch("https://worker.test/tickets/123", {
+        headers: { Cookie: `__queue_token=${token}` },
+        redirect: "manual",
+      });
+      // Expired → redirects to queue
+      expect(res.status).toBe(302);
+      // No Set-Cookie on redirect
+      const setCookie = res.headers.get("Set-Cookie");
+      expect(setCookie).toBeNull();
+    });
+  });
+
   // ── Edge caching ──
 
   describe("Edge caching", () => {

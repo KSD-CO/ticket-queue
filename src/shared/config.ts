@@ -182,6 +182,17 @@ export function validateCreateEvent(input: unknown): { valid: true; data: Create
     errors.mode = 'mode must be "always" or "threshold"';
   }
 
+  if (data.activationThreshold !== undefined) {
+    if (typeof data.activationThreshold !== "number" || data.activationThreshold < 1) {
+      errors.activationThreshold = "activationThreshold must be a positive integer (>= 1)";
+    }
+  }
+
+  // If mode is "threshold", activationThreshold should be provided
+  if (data.mode === "threshold" && data.activationThreshold === undefined) {
+    errors.activationThreshold = "activationThreshold is required when mode is \"threshold\"";
+  }
+
   // Validate ISO 8601 date strings if provided
   if (data.eventStartTime !== undefined) {
     if (typeof data.eventStartTime !== "string" || isNaN(new Date(data.eventStartTime).getTime())) {
@@ -273,6 +284,12 @@ export function validateUpdateEvent(input: unknown): { valid: true; data: Update
 
   if (data.mode !== undefined && data.mode !== "always" && data.mode !== "threshold") {
     errors.mode = 'mode must be "always" or "threshold"';
+  }
+
+  if (data.activationThreshold !== undefined) {
+    if (typeof data.activationThreshold !== "number" || data.activationThreshold < 1) {
+      errors.activationThreshold = "activationThreshold must be a positive integer (>= 1)";
+    }
   }
 
   if (data.eventStartTime !== undefined) {
